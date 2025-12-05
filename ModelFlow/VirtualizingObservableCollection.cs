@@ -989,5 +989,45 @@
         {
             Provider?.GetCount(false);
         }
+
+        #region Memory-Efficient Real-Time Insertion Support
+
+        /// <summary>
+        /// Gets the PaginationManager from whichever provider is set.
+        /// </summary>
+        private PaginationManager<T>? GetPaginationManager()
+        {
+            if (Provider is PaginationManager<T> pm)
+                return pm;
+            if (ProviderAsync is PaginationManager<T> pmAsync)
+                return pmAsync;
+            return null;
+        }
+
+        /// <summary>
+        /// Adjusts the count without triggering data loads.
+        /// Delegates to PaginationManager.
+        /// </summary>
+        internal void AdjustCount(int delta)
+        {
+            GetPaginationManager()?.AdjustCount(delta);
+        }
+
+        /// <summary>
+        /// Checks if an index is in a loaded page.
+        /// Delegates to PaginationManager.
+        /// </summary>
+        internal bool IsIndexLoaded(int index)
+        {
+            return GetPaginationManager()?.IsIndexLoaded(index) ?? false;
+        }
+
+        /// <summary>
+        /// Gets whether the count has been fetched.
+        /// Delegates to PaginationManager.
+        /// </summary>
+        internal bool HasGotCount => GetPaginationManager()?.HasGotCount ?? false;
+
+        #endregion
     }
 }

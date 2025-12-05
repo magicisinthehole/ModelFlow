@@ -3,6 +3,7 @@ namespace ModelFlow.DataVirtualization.DataManagement;
 using System;
 using System.Collections;
 using System.Collections.Generic;
+using System.Collections.Specialized;
 using System.ComponentModel;
 using System.Linq;
 using System.Linq.Expressions;
@@ -91,7 +92,12 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
 
         SortDescriptionList = new SortDescriptionList();
 
-        SortDescriptionList.CollectionChanged += (_, _) => Invalidate();
+        SortDescriptionList.CollectionChanged += OnSortDescriptionListChanged;
+    }
+
+    private void OnSortDescriptionListChanged(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        Invalidate();
     }
 
     /// <summary>
@@ -152,6 +158,228 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     /// Invalidation of the datasource is automatic when this is modified.
     /// </summary>
     public SortDescriptionList SortDescriptionList { get; }
+
+    /// <summary>
+    /// Replaces all sort descriptions atomically with a single invalidation.
+    /// Use this instead of manually clearing and adding to SortDescriptionList
+    /// to avoid multiple invalidation events.
+    /// </summary>
+    /// <param name="descriptions">The new sort descriptions.</param>
+    public void SetSortDescriptions(IEnumerable<SortDescription> descriptions)
+    {
+        // Temporarily remove the CollectionChanged handler to avoid multiple invalidations
+        SortDescriptionList.CollectionChanged -= OnSortDescriptionListChanged;
+
+        try
+        {
+            SortDescriptionList.Clear();
+            // Add in reverse order because DescriptionList.Add() inserts at position 0
+            // So to get [A, B, C] order, we need to add C, then B, then A
+            foreach (var desc in descriptions.Reverse())
+            {
+                SortDescriptionList.Add(desc);
+            }
+        }
+        finally
+        {
+            // Re-attach handler and invalidate once
+            SortDescriptionList.CollectionChanged += OnSortDescriptionListChanged;
+            Invalidate();
+        }
+    }
+
+    #region Non-Invalidating Mutations
+
+    /// <summary>
+    /// Updates a loaded item in place without invalidating the data source.
+    /// Use this for property updates (rating, play count, etc.) that don't affect sort order.
+    /// </summary>
+    /// <param name="predicate">A function to find the item to update.</param>
+    /// <param name="updatedItem">The updated item data.</param>
+    /// <returns>True if the item was found and updated, false otherwise.</returns>
+    public bool UpdateItem(Func<TViewModel, bool> predicate, TViewModel updatedItem)
+    {
+        foreach (var dataItem in _collection)
+        {
+            if (!dataItem.IsLoading && predicate(dataItem.Item))
+            {
+                dataItem.UpdateItem(updatedItem);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Appends an item to the end of the collection without invalidating.
+    /// Use this when adding items that should appear at the end (e.g., during ingestion with date-descending sort).
+    /// </summary>
+    /// <param name="item">The item to append.</param>
+    /// <returns>The created DataItem wrapper.</returns>
+    public DataItem<TViewModel> AppendItem(TViewModel item)
+    {
+        var dataItem = DataItem.Create(item);
+        _collection.Add(dataItem);
+        return dataItem;
+    }
+
+    /// <summary>
+    /// Inserts an item at the specified index without invalidating.
+    /// Use this when you know the correct position based on current sort order.
+    /// </summary>
+    /// <param name="index">The index at which to insert.</param>
+    /// <param name="item">The item to insert.</param>
+    /// <returns>The created DataItem wrapper.</returns>
+    public DataItem<TViewModel> InsertItem(int index, TViewModel item)
+    {
+        var dataItem = DataItem.Create(item);
+        _collection.Insert(index, dataItem);
+        return dataItem;
+    }
+
+    /// <summary>
+    /// Removes the first item matching the predicate without invalidating.
+    /// </summary>
+    /// <param name="predicate">A function to find the item to remove.</param>
+    /// <returns>True if an item was found and removed, false otherwise.</returns>
+    public bool RemoveItem(Func<TViewModel, bool> predicate)
+    {
+        DataItem<TViewModel>? toRemove = null;
+        foreach (var dataItem in _collection)
+        {
+            if (!dataItem.IsLoading && predicate(dataItem.Item))
+            {
+                toRemove = dataItem;
+                break;
+            }
+        }
+
+        if (toRemove != null)
+        {
+            return _collection.Remove(toRemove);
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Gets all currently loaded (non-placeholder) items.
+    /// Useful for iterating over cached items without triggering page loads.
+    /// </summary>
+    public IEnumerable<TViewModel> GetLoadedItems()
+    {
+        foreach (var dataItem in _collection)
+        {
+            if (!dataItem.IsLoading)
+            {
+                yield return dataItem.Item;
+            }
+        }
+    }
+
+    #endregion
+
+    #region Memory-Efficient Real-Time Insertion
+
+    /// <summary>
+    /// Adjusts the known count without invalidating or fetching from DB.
+    /// Use this when an item is added to the underlying data source
+    /// but doesn't need to appear in memory immediately (page not loaded).
+    /// </summary>
+    /// <param name="delta">The change in count (+1 for insert, -1 for remove).</param>
+    public void AdjustCount(int delta)
+    {
+        _collection.AdjustCount(delta);
+    }
+
+    /// <summary>
+    /// Checks if the index falls within a currently loaded page.
+    /// Use this to decide whether to insert in-memory or just adjust count.
+    /// </summary>
+    /// <param name="index">The index to check.</param>
+    /// <returns>True if the page containing this index is currently loaded.</returns>
+    public bool IsIndexLoaded(int index)
+    {
+        return _collection.IsIndexLoaded(index);
+    }
+
+    /// <summary>
+    /// Gets whether the data source has fetched its count from the underlying source.
+    /// </summary>
+    public bool HasGotCount => _collection.HasGotCount;
+
+    /// <summary>
+    /// Inserts an item at a specific index without invalidating.
+    /// Only call this if IsIndexLoaded(index) returns true.
+    /// </summary>
+    /// <param name="index">The sorted index to insert at.</param>
+    /// <param name="item">The item to insert.</param>
+    /// <returns>The created DataItem wrapper.</returns>
+    public DataItem<TViewModel> InsertItemAtIndex(int index, TViewModel item)
+    {
+        var dataItem = DataItem.Create(item);
+        _collection.Insert(index, dataItem);  // Uses existing Insert method
+        return dataItem;
+    }
+
+    /// <summary>
+    /// Calculates the sorted insertion index for an item based on current sort order.
+    /// Uses binary search - may make DB calls to compare items.
+    /// </summary>
+    /// <param name="item">The item to find insertion index for.</param>
+    /// <returns>The index where the item should be inserted to maintain sort order,
+    /// or the current count if item would sort last.</returns>
+    public async Task<int> GetSortedInsertionIndexAsync(TViewModel item)
+    {
+        await EnsureInitialisedAsync();
+
+        var model = GetModelForViewModel(item);
+        if (model is null)
+        {
+            return Collection.Count;
+        }
+
+        var count = Collection.Count;
+        if (count == 0)
+        {
+            return 0;
+        }
+
+        // Binary search for insertion point
+        int start = 0;
+        int end = count;
+
+        while (start < end)
+        {
+            int mid = start + ((end - start) / 2);
+
+            var sampleItems = await GetItemsAtAsync(mid, 1, x => BuildFilterSortQuery(x, _filterQuery));
+            var sample = sampleItems.FirstOrDefault();
+
+            if (sample == null)
+            {
+                return count;
+            }
+
+            // Use sort query to determine order
+            var compareItems = new[] { model, sample };
+            var sorted = BuildSortQuery(compareItems.AsQueryable()).ToList();
+
+            if (ModelsEqual(sorted[0], model))
+            {
+                // Our item sorts before the sample
+                end = mid;
+            }
+            else
+            {
+                // Our item sorts after (or equal to) the sample
+                start = mid + 1;
+            }
+        }
+
+        return start;
+    }
+
+    #endregion
 
     /// <summary>
     /// Called when the datasource is reset.
@@ -588,20 +816,31 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
         string propertyName)
     {
         var param = Expression.Parameter(typeof(TModel));
-        var prop = Expression.PropertyOrField(param, propertyName);
+
+        // Handle nested property paths like "Artist.SortName" or "Album.SortTitle"
+        Expression prop = param;
+        foreach (var member in propertyName.Split('.'))
+        {
+            prop = Expression.PropertyOrField(prop, member);
+        }
+
         var sortLambda = Expression.Lambda(prop, param);
 
         Expression<Func<IOrderedQueryable<TModel>>>? sortMethod = null;
 
+        // Check Expression.Type to determine if query has existing OrderBy
+        // Note: Don't use 'query is IOrderedQueryable<TModel>' - EnumerableQuery<T> always implements it
+        var isAlreadyOrdered = query.Expression.Type == typeof(IOrderedQueryable<TModel>);
+
         switch (sortDirection)
         {
-            case ListSortDirection.Ascending when query.Expression.Type == typeof(IOrderedQueryable<TModel>):
+            case ListSortDirection.Ascending when isAlreadyOrdered:
                 sortMethod = () => ((IOrderedQueryable<TModel>)query).ThenBy<TModel, object?>(k => null);
                 break;
             case ListSortDirection.Ascending:
                 sortMethod = () => query.OrderBy<TModel, object?>(k => null);
                 break;
-            case ListSortDirection.Descending when query.Expression.Type == typeof(IOrderedQueryable<TModel>):
+            case ListSortDirection.Descending when isAlreadyOrdered:
                 sortMethod = () => ((IOrderedQueryable<TModel>)query).ThenByDescending<TModel, object?>(k => null);
                 break;
             case ListSortDirection.Descending:

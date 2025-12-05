@@ -1,23 +1,14 @@
 ﻿namespace ModelFlow.DataVirtualization.Pageing
 {
-    using System;
-
+    /// <summary>
+    /// Tracks the delta (number of items added/removed) for a specific page.
+    /// Negative page numbers are valid - they represent pages created when
+    /// prepending items before the original page 0.
+    /// </summary>
     internal class PageDelta
     {
-        private int _page;
-
         public int Delta { get; set; }
 
-        public int Page
-        {
-            get => _page;
-            set
-            {
-                if (value < 0)
-                    throw new ArgumentOutOfRangeException(
-                        $"Page number value for PageDelta must be >= 0, but {value} was provided.");
-                _page = value;
-            }
-        }
+        public int Page { get; set; }
     }
 }

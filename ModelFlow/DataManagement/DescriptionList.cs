@@ -68,6 +68,19 @@ namespace ModelFlow.DataVirtualization.DataManagement
             }
         }
 
+        /// <summary>
+        ///     Removes all items from the list.
+        /// </summary>
+        public void Clear()
+        {
+            if (_filterDescriptions.Count > 0)
+            {
+                _filterDescriptions.Clear();
+                OnCollectionChanged(
+                    new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
+            }
+        }
+
         protected void OnCollectionChanged(NotifyCollectionChangedEventArgs arg)
         {
             var evnt = CollectionChanged;

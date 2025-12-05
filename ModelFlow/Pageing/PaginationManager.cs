@@ -1443,5 +1443,91 @@
 
             return index;
         }
+
+        #region Memory-Efficient Real-Time Insertion Support
+
+        /// <summary>
+        /// Adjusts the local count without triggering a data fetch.
+        /// Safe to call from any thread.
+        /// </summary>
+        /// <param name="delta">The change in count (+1 for insert, -1 for remove).</param>
+        /// <remarks>
+        /// If count hasn't been fetched yet, this is a no-op.
+        /// The item will be included when count is fetched from the source.
+        /// </remarks>
+        public void AdjustCount(int delta)
+        {
+            int newCount;
+            lock (SyncRoot)
+            {
+                if (!_hasGotCount)
+                {
+                    // Count not yet fetched - item is in DB, will appear when fetched
+                    return;
+                }
+
+                newCount = Interlocked.Add(ref _localCount, delta);
+            }
+
+            // Notify outside lock to prevent deadlocks
+            RaiseCountChanged(needsReset: false, newCount);
+        }
+
+        /// <summary>
+        /// Checks if the specified index falls within a currently loaded page.
+        /// </summary>
+        /// <param name="index">The zero-based index to check.</param>
+        /// <returns>True if the page containing this index is loaded in memory.</returns>
+        public bool IsIndexLoaded(int index)
+        {
+            lock (PageLock)
+            {
+                if (!_hasGotCount || index < 0 || index >= _localCount)
+                {
+                    return false;
+                }
+
+                CalculateFromIndex(index, out var page, out _);
+                return _pages.ContainsKey(page);
+            }
+        }
+
+        /// <summary>
+        /// Gets the page number for a given index.
+        /// </summary>
+        /// <param name="index">The index to convert.</param>
+        /// <returns>The page number, or -1 if index is out of range.</returns>
+        public int GetPageForIndex(int index)
+        {
+            lock (PageLock)
+            {
+                if (!_hasGotCount || index < 0 || index >= _localCount)
+                {
+                    return -1;
+                }
+
+                CalculateFromIndex(index, out var page, out _);
+                return page;
+            }
+        }
+
+        /// <summary>
+        /// Gets information about which pages are currently loaded.
+        /// Useful for debugging and understanding memory usage.
+        /// </summary>
+        public IReadOnlyList<int> GetLoadedPageNumbers()
+        {
+            lock (PageLock)
+            {
+                return _pages.Keys.ToList();
+            }
+        }
+
+        /// <summary>
+        /// Gets whether the count has been fetched from the source.
+        /// </summary>
+        public bool HasGotCount => _hasGotCount;
+
+        #endregion
     }
 }

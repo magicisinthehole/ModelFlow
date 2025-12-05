@@ -85,7 +85,17 @@ public class DataItem<T> : DataItem, IDataItem, INotifyPropertyChanged where T :
         {
             Item = obj;
         }
-        
+
         OnPropertyChanged(nameof(IsLoading));
+    }
+
+    /// <summary>
+    /// Updates the wrapped item and notifies bindings.
+    /// Use this for in-place updates without invalidating the data source.
+    /// </summary>
+    /// <param name="newItem">The updated item to replace the current one.</param>
+    public void UpdateItem(T newItem)
+    {
+        SetItem(newItem);
     }
 }
