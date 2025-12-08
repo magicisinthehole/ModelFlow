@@ -4,7 +4,6 @@
     using System.Collections;
     using System.Collections.Generic;
     using System.Collections.Specialized;
-    using System.Diagnostics;
     using System.Linq;
     using System.Threading;
     using System.Threading.Tasks;
@@ -184,9 +183,7 @@
         /// </value>
         public IPagedSourceProviderAsync<T> ProviderAsync { get; set; }
 
-        public int StepToJumpThreashold { get; set; } = 10;
-
-        private int AddNotificationsCount { get; set; }
+        public int StepToJumpThreshold { get; set; } = 10;
 
         private int LocalCount
         {
@@ -469,18 +466,13 @@
 
             if (ret == null)
             {
-                //return this.ProviderAsync.GetPlaceHolder(0, 0,0);
-                Debugger.Break();
-                //TODO <-
-                if (nullTryCount <= 0) //inconsistency, notify reset collection
+                // Inconsistency detected - notify reset collection
+                if (nullTryCount <= 0)
                 {
                     OnProviderCollectionChanged(Provider,
                         new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
-                    return ret;
                 }
-
-                Thread.Sleep(100);
-                return GetAt(index, voc, --nullTryCount);
+                return ret;
             }
 
             return ret;
@@ -552,7 +544,7 @@
                     }
                     catch (Exception)
                     {
-                        Debugger.Break();
+                        // Cancellation may throw if already cancelled - ignore
                     }
                 }
 
@@ -576,7 +568,7 @@
                 }
                 catch (Exception)
                 {
-                    Debugger.Break();
+                    // Cancellation may throw if already cancelled - ignore
                 }
 
                 try
@@ -585,7 +577,7 @@
                 }
                 catch (Exception)
                 {
-                    Debugger.Break();
+                    // Removal may fail if not present - ignore
                 }
             }
         }
@@ -647,7 +639,7 @@
                 }
                 catch (Exception)
                 {
-                    Debugger.Break();
+                    // Removal may fail if not present - ignore
                 }
             }
         }
@@ -682,7 +674,7 @@
             //{
             while (!done)
             {
-                if (stepAmount > PageSize * StepToJumpThreashold && ignoreSteps <= 0)
+                if (stepAmount > PageSize * StepToJumpThreshold && ignoreSteps <= 0)
                 {
                     var targetPage = page - stepAmount / PageSize;
                     var sourcePage = page;
@@ -751,7 +743,7 @@
             //{
             while (!done)
             {
-                if (stepAmount > PageSize * StepToJumpThreashold && ignoreSteps <= 0)
+                if (stepAmount > PageSize * StepToJumpThreshold && ignoreSteps <= 0)
                 {
                     var targetPage = page + stepAmount / PageSize;
                     var sourcePage = page;
@@ -829,23 +821,6 @@
             newPage.PageFetchState = PageFetchStateEnum.Fetched;
         }
 
-        /// <summary>
-        ///     Fills the page from asynchronous provider.
-        /// </summary>
-        /// <param name="newPage">The new page.</param>
-        /// <param name="pageOffset">The page offset.</param>
-        /*private void FillPageFromAsyncProvider(ISourcePage<T> newPage, int pageOffset)
-        {
-            var data = ProviderAsync.GetItemsAt(pageOffset, newPage.ItemsPerPage, false);
-            newPage.WiredDateTime = data.LoadedAt;
-            foreach (var o in data.Items)
-            {
-                newPage.Append(o, null, ExpiryComparer);
-            }
-
-            newPage.PageFetchState = PageFetchStateEnum.Fetched;
-        }*/
-
         private async Task GetCountAsync(CancellationTokenSource cts)
         {
             if (!cts.IsCancellationRequested)
@@ -884,7 +859,6 @@
                     {
                         if (!(item is T newItem)) continue;
 
-                        AddNotificationsCount++;
                         OnAppend(newItem, DateTime.Now, true, true);
                     }
 
@@ -1086,19 +1060,6 @@
             }
 
             page.WiredDateTime = data.LoadedAt;
-
-            var i = 0;
-            foreach (var item in data.Items)
-            {
-                if (cts.IsCancellationRequested)
-                {
-                    RemovePageRequest(page.Page);
-                    return;
-                }
-
-                i++;
-            }
-
             page.PageFetchState = PageFetchStateEnum.Fetched;
 
             VirtualizationManager.Instance.RunOnUi(() =>
@@ -1216,7 +1177,6 @@
             else
             {
                 oldItem = new PagedSourceItemsPacket<T>(Provider.GetItemsAt(index, 1)).Items.FirstOrDefault();
-                if (oldItem != default(T)) Debugger.Break();
             }
 
             if (Provider is IEditableProvider<T> editableProvider)
@@ -1362,7 +1322,6 @@
             else
             {
                 oldItem = new PagedSourceItemsPacket<T>(Provider.GetItemsAt(index, 1)).Items.FirstOrDefault();
-                if (oldItem != default(T)) Debugger.Break();
             }
 
             if (Provider is IEditableProviderIndexBased<T> editableProvider)
