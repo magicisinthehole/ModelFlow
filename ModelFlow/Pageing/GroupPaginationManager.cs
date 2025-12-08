@@ -17,7 +17,7 @@ namespace ModelFlow.DataVirtualization.Pageing
     /// <typeparam name="T">The type of items in the group.</typeparam>
     internal class GroupPaginationManager<T> where T : DataItem, IDataItem
     {
-        private readonly int _groupIndex;
+        private int _groupIndex;
         private readonly Func<ISourcePage<T>, int, int, int, Action?, Task<IEnumerable<T>>> _fetchItems;
         private readonly Func<int, int, int, int, T> _getPlaceholder;
         private readonly Dictionary<int, ISourcePage<T>> _pages = new Dictionary<int, ISourcePage<T>>();
@@ -85,6 +85,14 @@ namespace ModelFlow.DataVirtualization.Pageing
         {
             _itemCount = count;
             _hasGotCount = true;
+        }
+
+        /// <summary>
+        /// Updates the group index (e.g., after a group is inserted before this one).
+        /// </summary>
+        public void UpdateGroupIndex(int newIndex)
+        {
+            _groupIndex = newIndex;
         }
 
         /// <summary>
@@ -464,6 +472,7 @@ namespace ModelFlow.DataVirtualization.Pageing
         /// <summary>
         /// Appends an item to the end of this group.
         /// Properly tracks deltas if the last page is loaded.
+        /// For empty groups, creates page 0 to store the item.
         /// </summary>
         /// <param name="item">The item to append.</param>
         public void Append(T item)
@@ -487,6 +496,14 @@ namespace ModelFlow.DataVirtualization.Pageing
                         AddOrUpdateAdjustment(page, 1);
                     }
                 }
+                else if (_itemCount == 0 && page == 0)
+                {
+                    // Empty group - create page 0 to store the first item
+                    var newPage = _reclaimer.MakePage(0, 1);
+                    _pages.Add(0, newPage);
+                    newPage.Append(item, DateTime.Now, ExpiryComparer);
+                    _hasGotCount = true;
+                }
 
                 _itemCount++;
             }
@@ -509,6 +526,12 @@ namespace ModelFlow.DataVirtualization.Pageing
 
                     // Track the delta adjustment (negative for removal)
                     AddOrUpdateAdjustment(page, -1);
+
+                    // Keep ItemsPerPage in sync with actual item count
+                    if (dataPage.ItemsPerPage > 0)
+                    {
+                        dataPage.ItemsPerPage--;
+                    }
 
                     _itemCount = Math.Max(0, _itemCount - 1);
                 }

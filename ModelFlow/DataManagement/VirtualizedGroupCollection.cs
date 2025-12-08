@@ -26,7 +26,6 @@ namespace ModelFlow.DataVirtualization.DataManagement
         private readonly SemaphoreSlim _structureLock = new SemaphoreSlim(1, 1);
 
         private List<VirtualizedGroup<T>>? _groups;
-        private IReadOnlyList<GroupInfo>? _cachedStructure;
         private volatile bool _isStructureLoaded;
         private volatile bool _isStructureLoading;
 
@@ -89,10 +88,49 @@ namespace ModelFlow.DataVirtualization.DataManagement
         public bool IsStructureLoading => _isStructureLoading;
 
         /// <summary>
-        /// Gets the cached group structure for layout calculations.
+        /// Gets the group structure for layout calculations.
+        /// Reads directly from the actual groups - single source of truth.
         /// Returns null if structure hasn't been loaded yet.
         /// </summary>
-        public IReadOnlyList<GroupInfo>? GetLayoutStructure() => _cachedStructure;
+        public IReadOnlyList<GroupInfo>? GetLayoutStructure()
+        {
+            if (_groups == null) return null;
+            return _groups.Select(g => new GroupInfo(g.Key, g.ItemCount, g.HeaderData)).ToList();
+        }
+
+        /// <summary>
+        /// Returns this collection as a non-generic IReadOnlyList for UI binding.
+        /// Since IVirtualizedGroup{T} extends IVirtualizedGroup, this is a safe cast.
+        /// </summary>
+        public IReadOnlyList<IVirtualizedGroup>? AsNonGeneric()
+        {
+            if (!_isStructureLoaded || _groups == null) return null;
+            return new NonGenericGroupList<T>(_groups);
+        }
+
+        /// <summary>
+        /// Wrapper to expose typed groups as non-generic for UI binding.
+        /// </summary>
+        private sealed class NonGenericGroupList<TItem> : IReadOnlyList<IVirtualizedGroup> where TItem : class
+        {
+            private readonly IReadOnlyList<VirtualizedGroup<TItem>> _groups;
+
+            public NonGenericGroupList(IReadOnlyList<VirtualizedGroup<TItem>> groups)
+            {
+                _groups = groups;
+            }
+
+            public IVirtualizedGroup this[int index] => _groups[index];
+            public int Count => _groups.Count;
+
+            public IEnumerator<IVirtualizedGroup> GetEnumerator()
+            {
+                foreach (var group in _groups)
+                    yield return group;
+            }
+
+            IEnumerator IEnumerable.GetEnumerator() => GetEnumerator();
+        }
 
         /// <summary>
         /// Ensures the group structure is loaded (synchronously waits if needed).
@@ -165,7 +203,6 @@ namespace ModelFlow.DataVirtualization.DataManagement
                 }
 
                 _groups = null;
-                _cachedStructure = null;
                 _isStructureLoaded = false;
             }
             finally
@@ -191,8 +228,6 @@ namespace ModelFlow.DataVirtualization.DataManagement
 
                 await VirtualizationManager.Instance.RunOnUiAsync(new ActionVirtualizationWrapper(() =>
                 {
-                    _cachedStructure = structures;
-
                     // Create or update groups
                     if (_groups == null)
                     {
@@ -256,6 +291,52 @@ namespace ModelFlow.DataVirtualization.DataManagement
         }
 
         #region Real-Time Collection Manipulation
+
+        /// <summary>
+        /// Inserts a new group at the specified index.
+        /// </summary>
+        /// <param name="groupIndex">The index to insert at.</param>
+        /// <param name="info">The group info.</param>
+        /// <returns>The created group, or null if insertion failed.</returns>
+        internal VirtualizedGroup<T>? InsertGroupAt(int groupIndex, GroupInfo info)
+        {
+            VirtualizedGroup<T>? newGroup = null;
+
+            _structureLock.Wait();
+            try
+            {
+                if (_groups == null)
+                {
+                    _groups = new List<VirtualizedGroup<T>>();
+                }
+
+                if (groupIndex < 0 || groupIndex > _groups.Count)
+                    return null;
+
+                newGroup = CreateGroup(groupIndex, info);
+                _groups.Insert(groupIndex, newGroup);
+
+                // Update indices of subsequent groups
+                for (int i = groupIndex + 1; i < _groups.Count; i++)
+                {
+                    _groups[i].UpdateGroupIndex(i);
+                }
+            }
+            finally
+            {
+                _structureLock.Release();
+            }
+
+            // Notify listeners OUTSIDE the lock to prevent deadlocks
+            if (newGroup != null)
+            {
+                CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
+                    NotifyCollectionChangedAction.Add, newGroup, groupIndex));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Count)));
+            }
+
+            return newGroup;
+        }
 
         /// <summary>
         /// Inserts an item at a specific index within a group.

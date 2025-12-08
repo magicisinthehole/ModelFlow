@@ -55,7 +55,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
         }
 
         /// <inheritdoc />
-        public int GroupIndex { get; }
+        public int GroupIndex { get; private set; }
 
         /// <inheritdoc />
         public string Key => _groupInfo.Key;
@@ -64,10 +64,13 @@ namespace ModelFlow.DataVirtualization.DataManagement
         public object? HeaderData => _groupInfo.HeaderData;
 
         /// <inheritdoc />
-        public int ItemCount => _groupInfo.ItemCount;
+        public int ItemCount => _paginationManager.Count;
 
         /// <inheritdoc />
         public IReadOnlyList<DataItem<T>> Items => _itemsList;
+
+        /// <inheritdoc />
+        public object GetItemAt(int index) => Items[index];
 
         /// <inheritdoc />
         public bool IsItemsInitialized => true; // Items list is always available
@@ -82,6 +85,15 @@ namespace ModelFlow.DataVirtualization.DataManagement
         {
             _groupInfo = newInfo;
             _paginationManager.SetItemCount(newInfo.ItemCount);
+        }
+
+        /// <summary>
+        /// Updates the group index (e.g., after a group is inserted before this one).
+        /// </summary>
+        internal void UpdateGroupIndex(int newIndex)
+        {
+            GroupIndex = newIndex;
+            _paginationManager.UpdateGroupIndex(newIndex);
         }
 
         /// <summary>

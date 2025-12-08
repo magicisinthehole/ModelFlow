@@ -58,9 +58,38 @@ namespace ModelFlow.DataVirtualization.DataManagement
         /// </summary>
         public abstract IEnumerable DataCollection { get; }
 
+        /// <summary>
+        /// Gets the virtualized groups with non-generic access.
+        /// UI components can use this to access groups without knowing the item type.
+        /// Returns null if structure hasn't been loaded yet.
+        /// </summary>
+        public abstract IReadOnlyList<IVirtualizedGroup>? Groups { get; }
+
+        /// <summary>
+        /// Gets the cached group structure for layout calculations.
+        /// Returns null if structure hasn't been loaded yet.
+        /// </summary>
+        public abstract IReadOnlyList<GroupInfo>? LayoutStructure { get; }
+
+        /// <summary>
+        /// Gets whether the structure has been loaded.
+        /// </summary>
+        public abstract bool IsStructureLoaded { get; }
+
+        /// <summary>
+        /// Ensures the group structure is loaded.
+        /// </summary>
+        public abstract Task EnsureStructureLoadedAsync();
+
         public event PropertyChangedEventHandler? PropertyChanged;
 
         public event EventHandler? FilterQueryCleared;
+
+        /// <summary>
+        /// Fired when the groups collection changes (groups added/removed).
+        /// UI should subscribe to this to react to dynamic group changes.
+        /// </summary>
+        public event System.Collections.Specialized.NotifyCollectionChangedEventHandler? GroupsCollectionChanged;
 
         protected void RaiseFilterQueryCleared()
         {
@@ -70,6 +99,11 @@ namespace ModelFlow.DataVirtualization.DataManagement
         protected virtual void OnPropertyChanged([CallerMemberName] string? propertyName = null)
         {
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(propertyName));
+        }
+
+        protected void RaiseGroupsCollectionChanged(System.Collections.Specialized.NotifyCollectionChangedEventArgs e)
+        {
+            GroupsCollectionChanged?.Invoke(this, e);
         }
     }
 
@@ -104,6 +138,10 @@ namespace ModelFlow.DataVirtualization.DataManagement
             _autoSyncEnabled = autoSync;
             _selector = selector;
             _collection = new VirtualizedGroupCollection<TViewModel>(this, itemPageSize: itemPageSize, maxItemPagesPerGroup: maxItemPagesPerGroup);
+
+            // Forward collection change events to the base class event for UI binding
+            _collection.CollectionChanged += (sender, e) => RaiseGroupsCollectionChanged(e);
+
             SortDescriptionList = new SortDescriptionList();
             SortDescriptionList.CollectionChanged += OnSortDescriptionListChanged;
         }
@@ -116,9 +154,14 @@ namespace ModelFlow.DataVirtualization.DataManagement
         #region Public Properties
 
         /// <summary>
-        /// Gets the virtualized group collection.
+        /// Gets the virtualized group collection with typed item access.
         /// </summary>
-        public IReadOnlyList<IVirtualizedGroup<TViewModel>> Groups => _collection;
+        public IReadOnlyList<IVirtualizedGroup<TViewModel>> TypedGroups => _collection;
+
+        /// <summary>
+        /// Gets the virtualized groups with non-generic access for UI binding.
+        /// </summary>
+        public override IReadOnlyList<IVirtualizedGroup>? Groups => _collection.AsNonGeneric();
 
         /// <summary>
         /// Gets the data collection for binding.
@@ -133,7 +176,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
         /// <summary>
         /// Gets the cached group structure for layout calculations.
         /// </summary>
-        public IReadOnlyList<GroupInfo>? LayoutStructure => GetLayoutStructure();
+        public override IReadOnlyList<GroupInfo>? LayoutStructure => GetLayoutStructure();
 
         /// <summary>
         /// Gets the cached group structure for layout calculations.
@@ -144,7 +187,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
         /// <summary>
         /// Gets whether the structure has been loaded.
         /// </summary>
-        public bool IsStructureLoaded => _collection.IsStructureLoaded;
+        public override bool IsStructureLoaded => _collection.IsStructureLoaded;
 
         #endregion
 
@@ -178,7 +221,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
         /// <summary>
         /// Ensures the group structure is loaded.
         /// </summary>
-        public Task EnsureStructureLoadedAsync() => _collection.EnsureStructureLoadedAsync();
+        public override Task EnsureStructureLoadedAsync() => _collection.EnsureStructureLoadedAsync();
 
         /// <summary>
         /// Refreshes the group structure without clearing all data.
@@ -707,6 +750,52 @@ namespace ModelFlow.DataVirtualization.DataManagement
             var dataItem = DataItem.Create(item);
             _collection.AppendItemToGroup(group.GroupIndex, dataItem);
             return dataItem;
+        }
+
+        /// <summary>
+        /// Inserts a new group at the specified index.
+        /// </summary>
+        /// <param name="groupIndex">The index to insert at.</param>
+        /// <param name="groupKey">The group key.</param>
+        /// <param name="itemCount">Initial item count for the group.</param>
+        /// <param name="headerData">Optional header data for the group.</param>
+        /// <returns>The created group, or null if insertion failed.</returns>
+        public IVirtualizedGroup<TViewModel>? InsertGroup(int groupIndex, string groupKey, int itemCount = 0, object? headerData = null)
+        {
+            var info = new GroupInfo(groupKey, itemCount, headerData);
+            return _collection.InsertGroupAt(groupIndex, info);
+        }
+
+        /// <summary>
+        /// Gets the sorted insertion index for a new group based on the group key.
+        /// Uses binary search on the existing groups.
+        /// </summary>
+        /// <param name="groupKey">The group key to find insertion position for.</param>
+        /// <returns>The index where the group should be inserted.</returns>
+        public int GetGroupInsertionIndex(string groupKey)
+        {
+            var structure = _collection.GetLayoutStructure();
+            if (structure == null || structure.Count == 0)
+                return 0;
+
+            // Binary search for the correct position
+            int left = 0;
+            int right = structure.Count - 1;
+
+            while (left <= right)
+            {
+                int mid = (left + right) / 2;
+                int cmp = string.Compare(structure[mid].Key, groupKey, StringComparison.OrdinalIgnoreCase);
+
+                if (cmp < 0)
+                    left = mid + 1;
+                else if (cmp > 0)
+                    right = mid - 1;
+                else
+                    return mid; // Exact match (shouldn't happen for new group)
+            }
+
+            return left;
         }
 
         /// <summary>

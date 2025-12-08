@@ -1308,6 +1308,12 @@
             {
                 var dataPage = SafeGetPage(page, null, index);
                 dataPage.RemoveAt(offset, timestamp, ExpiryComparer);
+
+                // Keep ItemsPerPage in sync with actual item count
+                if (dataPage.ItemsPerPage > 0)
+                {
+                    dataPage.ItemsPerPage--;
+                }
             }
 
             AddOrUpdateAdjustment(page, -1);
@@ -1384,6 +1390,12 @@
 
             var dataPage = SafeGetPage(page, null, index);
             dataPage.RemoveAt(pageIndex, DateTime.Now, ExpiryComparer);
+
+            // Keep ItemsPerPage in sync with actual item count
+            if (dataPage.ItemsPerPage > 0)
+            {
+                dataPage.ItemsPerPage--;
+            }
 
             AddOrUpdateAdjustment(page, -1);
 
