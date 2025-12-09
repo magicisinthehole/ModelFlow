@@ -64,5 +64,22 @@ namespace ModelFlow.DataVirtualization.Interfaces
         /// Returns (-1, -1) if not found.
         /// </summary>
         Task<(int groupIndex, int itemIndex)> IndexOfAsync(T item);
+
+        /// <summary>
+        /// Gets items for multiple groups in a single batch operation.
+        /// Used for prefetching adjacent groups to reduce database round-trips.
+        /// </summary>
+        /// <param name="groupIndices">The indices of groups to fetch.</param>
+        /// <param name="itemsPerGroup">Number of items to fetch per group (typically first page).</param>
+        /// <returns>Dictionary mapping group index to fetched items.</returns>
+        Task<IReadOnlyDictionary<int, IReadOnlyList<T>>> GetMultipleGroupItemsAsync(
+            IReadOnlyList<int> groupIndices,
+            int itemsPerGroup);
+
+        /// <summary>
+        /// Gets or sets the number of groups to prefetch ahead when loading a group.
+        /// Default is 0 (no prefetching). Set to a positive number to enable batch prefetching.
+        /// </summary>
+        int GroupPrefetchCount { get; }
     }
 }

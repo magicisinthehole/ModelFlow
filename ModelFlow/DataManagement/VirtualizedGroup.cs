@@ -112,6 +112,17 @@ namespace ModelFlow.DataVirtualization.DataManagement
             _paginationManager.RunClaim();
         }
 
+        /// <summary>
+        /// Pre-populates the first page (page 0) with already-fetched items.
+        /// Used by batch prefetching to fill groups before they're accessed.
+        /// If the first page is already loaded, this is a no-op.
+        /// </summary>
+        /// <param name="items">The items to populate the first page with.</param>
+        internal void PrepopulateFirstPage(IReadOnlyList<DataItem<T>> items)
+        {
+            _paginationManager.PrepopulateFirstPage(items);
+        }
+
         #region Real-Time Insertion Support
 
         /// <inheritdoc />

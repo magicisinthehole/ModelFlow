@@ -18,6 +18,11 @@ namespace ModelFlow.DataVirtualization.DataManagement
     public abstract class GroupedDataSource : INotifyPropertyChanged
     {
         /// <summary>
+        /// Default number of groups to prefetch ahead when loading group items.
+        /// </summary>
+        public const int DefaultGroupPrefetchCount = 5;
+
+        /// <summary>
         /// Static callbacks for monitoring CRUD operations across all GroupedDataSource instances.
         /// </summary>
         public static IDataSourceCallbacks? DataSourceCallbacks;
@@ -119,6 +124,8 @@ namespace ModelFlow.DataVirtualization.DataManagement
         private readonly Func<TModel, TViewModel> _selector;
         private readonly VirtualizedGroupCollection<TViewModel> _collection;
         private readonly bool _autoSyncEnabled;
+        private readonly int _groupPrefetchCount;
+        private readonly int _itemPageSize;
         private Func<IQueryable<TModel>, IQueryable<TModel>>? _filterQuery;
         private int _operationCount;
 
@@ -129,14 +136,18 @@ namespace ModelFlow.DataVirtualization.DataManagement
         /// <param name="itemPageSize">Page size for items within each group.</param>
         /// <param name="maxItemPagesPerGroup">Maximum item pages to cache per group.</param>
         /// <param name="autoSync">Whether to automatically sync changes back to the database for IAutoSynchronize ViewModels.</param>
+        /// <param name="groupPrefetchCount">Number of groups to prefetch ahead. Set to 0 to disable prefetching.</param>
         protected GroupedDataSource(
             Func<TModel, TViewModel> selector,
             int itemPageSize = 20,
             int maxItemPagesPerGroup = 10,
-            bool autoSync = true)
+            bool autoSync = true,
+            int groupPrefetchCount = DefaultGroupPrefetchCount)
         {
             _autoSyncEnabled = autoSync;
             _selector = selector;
+            _groupPrefetchCount = groupPrefetchCount;
+            _itemPageSize = itemPageSize;
             _collection = new VirtualizedGroupCollection<TViewModel>(this, itemPageSize: itemPageSize, maxItemPagesPerGroup: maxItemPagesPerGroup);
 
             // Forward collection change events to the base class event for UI binding
@@ -329,6 +340,30 @@ namespace ModelFlow.DataVirtualization.DataManagement
         protected virtual string? GetGroupKeyForItem(TViewModel viewModel)
         {
             return null;
+        }
+
+        /// <summary>
+        /// Gets items for multiple groups in a single batch operation.
+        /// Override to enable batch prefetching for improved scrolling performance.
+        /// The default implementation falls back to sequential single-group fetches.
+        /// </summary>
+        /// <param name="groupKeys">The group keys to fetch items for.</param>
+        /// <param name="itemsPerGroup">Number of items to fetch per group (typically first page).</param>
+        /// <param name="filterSortQuery">Filter and sort query.</param>
+        /// <returns>Dictionary mapping group key to fetched items.</returns>
+        protected virtual async Task<IReadOnlyDictionary<string, IReadOnlyList<TModel>>> GetMultipleGroupItemsAsync(
+            IReadOnlyList<string> groupKeys,
+            int itemsPerGroup,
+            Func<IQueryable<TModel>, IQueryable<TModel>> filterSortQuery)
+        {
+            // Default implementation: sequential fetches (override for batch optimization)
+            var results = new Dictionary<string, IReadOnlyList<TModel>>();
+            foreach (var groupKey in groupKeys)
+            {
+                var items = await GetGroupItemsAsync(groupKey, 0, itemsPerGroup, filterSortQuery);
+                results[groupKey] = items.ToList();
+            }
+            return results;
         }
 
         #endregion
@@ -1055,6 +1090,75 @@ namespace ModelFlow.DataVirtualization.DataManagement
             return IndexOfAsync(item.Item);
         }
 
+        int IGroupedSourceProviderAsync<DataItem<TViewModel>>.GroupPrefetchCount => _groupPrefetchCount;
+
+        async Task<IReadOnlyDictionary<int, IReadOnlyList<DataItem<TViewModel>>>> IGroupedSourceProviderAsync<DataItem<TViewModel>>.GetMultipleGroupItemsAsync(
+            IReadOnlyList<int> groupIndices,
+            int itemsPerGroup)
+        {
+            StartOperation();
+            try
+            {
+                await _collection.EnsureStructureLoadedAsync();
+
+                var structure = _collection.GetLayoutStructure();
+                if (structure == null)
+                    return new Dictionary<int, IReadOnlyList<DataItem<TViewModel>>>();
+
+                // Map group indices to group keys
+                var groupKeys = new List<string>();
+                var indexToKeyMap = new Dictionary<int, string>();
+                foreach (var groupIndex in groupIndices)
+                {
+                    if (groupIndex >= 0 && groupIndex < structure.Count)
+                    {
+                        var key = structure[groupIndex].Key;
+                        groupKeys.Add(key);
+                        indexToKeyMap[groupIndex] = key;
+                    }
+                }
+
+                if (groupKeys.Count == 0)
+                    return new Dictionary<int, IReadOnlyList<DataItem<TViewModel>>>();
+
+                // Capture filter
+                var filter = _filterQuery;
+
+                // Batch fetch from data source
+                var modelsByKey = await GetMultipleGroupItemsAsync(
+                    groupKeys,
+                    itemsPerGroup,
+                    x => BuildFilterSortQuery(x, filter));
+
+                // Convert models to DataItems
+                var results = new Dictionary<int, IReadOnlyList<DataItem<TViewModel>>>();
+                foreach (var kvp in indexToKeyMap)
+                {
+                    var groupIndex = kvp.Key;
+                    var groupKey = kvp.Value;
+                    if (modelsByKey.TryGetValue(groupKey, out var models))
+                    {
+                        var dataItems = new List<DataItem<TViewModel>>();
+                        foreach (var model in models)
+                        {
+                            var viewModel = _selector(model);
+                            await InitializeItemAsync(viewModel);
+                            var dataItem = DataItem.Create(viewModel);
+                            OnMaterializedInternal(dataItem);
+                            dataItems.Add(dataItem);
+                        }
+                        results[groupIndex] = dataItems;
+                    }
+                }
+
+                return results;
+            }
+            finally
+            {
+                EndOperation();
+            }
+        }
+
         #endregion
 
         #region Protected Helpers
@@ -1159,8 +1263,11 @@ namespace ModelFlow.DataVirtualization.DataManagement
     public abstract class GroupedDataSource<TViewModel> : GroupedDataSource<TViewModel, TViewModel>
         where TViewModel : class
     {
-        protected GroupedDataSource(int itemPageSize = 20, int maxItemPagesPerGroup = 10)
-            : base(x => x, itemPageSize, maxItemPagesPerGroup)
+        protected GroupedDataSource(
+            int itemPageSize = 20,
+            int maxItemPagesPerGroup = 10,
+            int groupPrefetchCount = DefaultGroupPrefetchCount)
+            : base(x => x, itemPageSize, maxItemPagesPerGroup, autoSync: true, groupPrefetchCount: groupPrefetchCount)
         {
         }
 

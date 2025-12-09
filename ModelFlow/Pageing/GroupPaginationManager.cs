@@ -575,6 +575,38 @@ namespace ModelFlow.DataVirtualization.Pageing
             }
         }
 
+        /// <summary>
+        /// Pre-populates the first page (page 0) with already-fetched items.
+        /// Used by batch prefetching to fill groups before they're accessed.
+        /// If the first page is already loaded, this is a no-op.
+        /// </summary>
+        /// <param name="items">The items to populate the first page with.</param>
+        public void PrepopulateFirstPage(IReadOnlyList<T> items)
+        {
+            if (items == null || items.Count == 0) return;
+
+            lock (PageLock)
+            {
+                // Don't prepopulate if page 0 already exists
+                if (_pages.ContainsKey(0)) return;
+
+                // Create page 0 with the prefetched items
+                var pageSize = Math.Min(items.Count, PageSize);
+                var newPage = _reclaimer.MakePage(0, pageSize);
+                _pages.Add(0, newPage);
+
+                // Fill with the prefetched items (not placeholders)
+                for (var i = 0; i < pageSize; i++)
+                {
+                    newPage.Append(items[i], DateTime.Now, ExpiryComparer);
+                }
+
+                // Mark as fetched immediately (no async fetch needed)
+                newPage.WiredDateTime = DateTime.Now;
+                newPage.PageFetchState = PageFetchStateEnum.Fetched;
+            }
+        }
+
         #endregion
 
         #region Page Management

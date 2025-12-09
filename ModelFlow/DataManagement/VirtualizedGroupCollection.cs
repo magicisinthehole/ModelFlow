@@ -14,6 +14,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
     /// <summary>
     /// A collection of virtualized groups with per-group pagination.
     /// Groups are loaded on demand, and items within each group are also virtualized.
+    /// Supports batch prefetching of adjacent groups for improved scrolling performance.
     /// </summary>
     /// <typeparam name="T">The type of items within groups.</typeparam>
     internal class VirtualizedGroupCollection<T> : IReadOnlyList<IVirtualizedGroup<T>>, INotifyCollectionChanged, INotifyPropertyChanged, IReclaimableService
@@ -24,6 +25,9 @@ namespace ModelFlow.DataVirtualization.DataManagement
         private readonly int _itemPageSize;
         private readonly int _maxItemPagesPerGroup;
         private readonly SemaphoreSlim _structureLock = new SemaphoreSlim(1, 1);
+        private readonly SemaphoreSlim _prefetchLock = new SemaphoreSlim(1, 1);
+        private readonly HashSet<int> _prefetchedGroups = new HashSet<int>();
+        private readonly HashSet<int> _prefetchingGroups = new HashSet<int>();
 
         private List<VirtualizedGroup<T>>? _groups;
         private volatile bool _isStructureLoaded;
@@ -210,6 +214,18 @@ namespace ModelFlow.DataVirtualization.DataManagement
                 _structureLock.Release();
             }
 
+            // Clear prefetch tracking
+            _prefetchLock.Wait();
+            try
+            {
+                _prefetchedGroups.Clear();
+                _prefetchingGroups.Clear();
+            }
+            finally
+            {
+                _prefetchLock.Release();
+            }
+
             _provider.OnReset(0);
             CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
             PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Count)));
@@ -282,7 +298,127 @@ namespace ModelFlow.DataVirtualization.DataManagement
 
         private async Task<IEnumerable<DataItem<T>>> FetchGroupItems(ISourcePage<DataItem<T>> page, int groupIndex, int offset, int count, Action? signal)
         {
-            return await _provider.GetGroupItemsAsync(page, groupIndex, offset, count, signal);
+            var result = await _provider.GetGroupItemsAsync(page, groupIndex, offset, count, signal);
+
+            // Mark this group as prefetched (its first page is now loaded)
+            if (offset == 0)
+            {
+                await _prefetchLock.WaitAsync();
+                try
+                {
+                    _prefetchedGroups.Add(groupIndex);
+                }
+                finally
+                {
+                    _prefetchLock.Release();
+                }
+
+                // Trigger prefetch of adjacent groups (fire and forget)
+                _ = PrefetchAdjacentGroupsAsync(groupIndex);
+            }
+
+            return result;
+        }
+
+        /// <summary>
+        /// Prefetches the first page of items for groups adjacent to the specified group.
+        /// This runs in the background to provide a smoother scrolling experience.
+        /// </summary>
+        private async Task PrefetchAdjacentGroupsAsync(int centerGroupIndex)
+        {
+            var prefetchCount = _provider.GroupPrefetchCount;
+            if (prefetchCount <= 0 || _groups == null) return;
+
+            // Determine which groups to prefetch (forward direction prioritized)
+            var groupsToPrefetch = new List<int>();
+
+            await _prefetchLock.WaitAsync();
+            try
+            {
+                // Prefetch groups ahead (primary scroll direction)
+                for (int i = 1; i <= prefetchCount; i++)
+                {
+                    var forwardIndex = centerGroupIndex + i;
+                    if (forwardIndex < _groups.Count &&
+                        !_prefetchedGroups.Contains(forwardIndex) &&
+                        !_prefetchingGroups.Contains(forwardIndex))
+                    {
+                        groupsToPrefetch.Add(forwardIndex);
+                        _prefetchingGroups.Add(forwardIndex);
+                    }
+
+                    // Also prefetch some groups behind (for scroll-back)
+                    if (i <= prefetchCount / 2)
+                    {
+                        var backwardIndex = centerGroupIndex - i;
+                        if (backwardIndex >= 0 &&
+                            !_prefetchedGroups.Contains(backwardIndex) &&
+                            !_prefetchingGroups.Contains(backwardIndex))
+                        {
+                            groupsToPrefetch.Add(backwardIndex);
+                            _prefetchingGroups.Add(backwardIndex);
+                        }
+                    }
+                }
+            }
+            finally
+            {
+                _prefetchLock.Release();
+            }
+
+            if (groupsToPrefetch.Count == 0) return;
+
+            try
+            {
+                // Batch fetch all groups at once
+                var prefetchedItems = await _provider.GetMultipleGroupItemsAsync(groupsToPrefetch, _itemPageSize);
+
+                // Pre-populate each group's first page with the fetched items
+                await VirtualizationManager.Instance.RunOnUiAsync(new ActionVirtualizationWrapper(() =>
+                {
+                    foreach (var kvp in prefetchedItems)
+                    {
+                        var groupIndex = kvp.Key;
+                        var items = kvp.Value;
+                        if (_groups != null && groupIndex < _groups.Count)
+                        {
+                            var group = _groups[groupIndex];
+                            group.PrepopulateFirstPage(items);
+                        }
+                    }
+                }));
+
+                // Mark as prefetched
+                await _prefetchLock.WaitAsync();
+                try
+                {
+                    foreach (var groupIndex in groupsToPrefetch)
+                    {
+                        _prefetchedGroups.Add(groupIndex);
+                        _prefetchingGroups.Remove(groupIndex);
+                    }
+                }
+                finally
+                {
+                    _prefetchLock.Release();
+                }
+            }
+            catch
+            {
+                // Prefetch failure is not critical - groups will load on demand
+                await _prefetchLock.WaitAsync();
+                try
+                {
+                    foreach (var groupIndex in groupsToPrefetch)
+                    {
+                        _prefetchingGroups.Remove(groupIndex);
+                    }
+                }
+                finally
+                {
+                    _prefetchLock.Release();
+                }
+            }
         }
 
         private DataItem<T> GetPlaceholder(int groupIndex, int itemOffset, int page, int pageOffset)
