@@ -193,17 +193,58 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     /// <summary>
     /// Updates a loaded item in place without invalidating the data source.
     /// Use this for property updates (rating, play count, etc.) that don't affect sort order.
+    /// Only searches loaded pages - does not trigger page loads for unloaded pages.
     /// </summary>
     /// <param name="predicate">A function to find the item to update.</param>
     /// <param name="updatedItem">The updated item data.</param>
     /// <returns>True if the item was found and updated, false otherwise.</returns>
     public bool UpdateItem(Func<TViewModel, bool> predicate, TViewModel updatedItem)
     {
-        foreach (var dataItem in _collection)
+        // Use index-based iteration with IsIndexLoaded check to avoid triggering page loads
+        // for unloaded pages. The old foreach approach called GetAt for every index,
+        // which triggers page loads even for items we'd skip due to IsLoading check.
+        var count = _collection.Count;
+        for (int i = 0; i < count; i++)
         {
-            if (!dataItem.IsLoading && predicate(dataItem.Item))
+            // Skip unloaded indices - don't trigger page loads
+            if (!_collection.IsIndexLoaded(i))
+                continue;
+
+            var dataItem = _collection[i];
+            if (!dataItem.IsLoading && dataItem.Item != null && predicate(dataItem.Item))
             {
                 dataItem.UpdateItem(updatedItem);
+                return true;
+            }
+        }
+        return false;
+    }
+
+    /// <summary>
+    /// Finds the first loaded item matching the predicate and calls an action on it.
+    /// Use this for in-place mutations (like rating updates) where the existing item instance
+    /// must be modified rather than replaced, to preserve UI bindings.
+    /// Only searches loaded pages - does not trigger page loads for unloaded pages.
+    /// </summary>
+    /// <param name="predicate">A function to find the item.</param>
+    /// <param name="action">An action to perform on the found item.</param>
+    /// <returns>True if the item was found and the action was called, false otherwise.</returns>
+    public bool MutateItem(Func<TViewModel, bool> predicate, Action<TViewModel> action)
+    {
+        // Use index-based iteration with IsIndexLoaded check to avoid triggering page loads
+        // for unloaded pages. The old foreach approach called GetAt for every index,
+        // which triggers page loads even for items we'd skip due to IsLoading check.
+        var count = _collection.Count;
+        for (int i = 0; i < count; i++)
+        {
+            // Skip unloaded indices - don't trigger page loads
+            if (!_collection.IsIndexLoaded(i))
+                continue;
+
+            var dataItem = _collection[i];
+            if (!dataItem.IsLoading && dataItem.Item != null && predicate(dataItem.Item))
+            {
+                action(dataItem.Item);
                 return true;
             }
         }
@@ -239,14 +280,24 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
 
     /// <summary>
     /// Removes the first item matching the predicate without invalidating.
+    /// Only searches loaded pages - does not trigger page loads for unloaded pages.
     /// </summary>
     /// <param name="predicate">A function to find the item to remove.</param>
     /// <returns>True if an item was found and removed, false otherwise.</returns>
     public bool RemoveItem(Func<TViewModel, bool> predicate)
     {
+        // Use index-based iteration with IsIndexLoaded check to avoid triggering page loads
+        // for unloaded pages. The old foreach approach called GetAt for every index,
+        // which triggers page loads even for items we'd skip due to IsLoading check.
         DataItem<TViewModel>? toRemove = null;
-        foreach (var dataItem in _collection)
+        var count = _collection.Count;
+        for (int i = 0; i < count; i++)
         {
+            // Skip unloaded indices - don't trigger page loads
+            if (!_collection.IsIndexLoaded(i))
+                continue;
+
+            var dataItem = _collection[i];
             if (!dataItem.IsLoading && predicate(dataItem.Item))
             {
                 toRemove = dataItem;
@@ -262,13 +313,51 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     }
 
     /// <summary>
+    /// Finds the first item matching the predicate.
+    /// Use this to get a reference to an item for direct property updates.
+    /// Only searches loaded pages - does not trigger page loads for unloaded pages.
+    /// </summary>
+    /// <param name="predicate">A function to find the item.</param>
+    /// <returns>The item if found, null otherwise.</returns>
+    public TViewModel? FindItem(Func<TViewModel, bool> predicate)
+    {
+        // Use index-based iteration with IsIndexLoaded check to avoid triggering page loads
+        // for unloaded pages. The old foreach approach called GetAt for every index,
+        // which triggers page loads even for items we'd skip due to IsLoading check.
+        var count = _collection.Count;
+        for (int i = 0; i < count; i++)
+        {
+            // Skip unloaded indices - don't trigger page loads
+            if (!_collection.IsIndexLoaded(i))
+                continue;
+
+            var dataItem = _collection[i];
+            if (!dataItem.IsLoading && dataItem.Item != null && predicate(dataItem.Item))
+            {
+                return dataItem.Item;
+            }
+        }
+        return default;
+    }
+
+    /// <summary>
     /// Gets all currently loaded (non-placeholder) items.
     /// Useful for iterating over cached items without triggering page loads.
+    /// Only returns items from loaded pages.
     /// </summary>
     public IEnumerable<TViewModel> GetLoadedItems()
     {
-        foreach (var dataItem in _collection)
+        // Use index-based iteration with IsIndexLoaded check to avoid triggering page loads
+        // for unloaded pages. The old foreach approach called GetAt for every index,
+        // which triggers page loads even for items we'd skip due to IsLoading check.
+        var count = _collection.Count;
+        for (int i = 0; i < count; i++)
         {
+            // Skip unloaded indices - don't trigger page loads
+            if (!_collection.IsIndexLoaded(i))
+                continue;
+
+            var dataItem = _collection[i];
             if (!dataItem.IsLoading)
             {
                 yield return dataItem.Item;

@@ -760,9 +760,33 @@ namespace ModelFlow.DataVirtualization.DataManagement
             {
                 foreach (var dataItem in group.Items)
                 {
-                    if (!dataItem.IsLoading && predicate(dataItem.Item))
+                    if (!dataItem.IsLoading && dataItem.Item != null && predicate(dataItem.Item))
                     {
                         dataItem.UpdateItem(updatedItem);
+                        return true;
+                    }
+                }
+            }
+            return false;
+        }
+
+        /// <summary>
+        /// Finds the first loaded item matching the predicate and calls an action on it.
+        /// Use this for in-place mutations (like rating updates) where the existing item instance
+        /// must be modified rather than replaced, to preserve UI bindings.
+        /// </summary>
+        /// <param name="predicate">A function to find the item.</param>
+        /// <param name="action">An action to perform on the found item.</param>
+        /// <returns>True if the item was found and the action was called, false otherwise.</returns>
+        public bool MutateItem(Func<TViewModel, bool> predicate, Action<TViewModel> action)
+        {
+            foreach (var group in _collection)
+            {
+                foreach (var dataItem in group.Items)
+                {
+                    if (!dataItem.IsLoading && dataItem.Item != null && predicate(dataItem.Item))
+                    {
+                        action(dataItem.Item);
                         return true;
                     }
                 }
