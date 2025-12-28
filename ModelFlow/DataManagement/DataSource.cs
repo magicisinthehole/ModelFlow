@@ -121,6 +121,24 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     }
 
     /// <summary>
+    /// Moves an item from one index to another without full refresh.
+    /// Fires NotifyCollectionChangedAction.Move for efficient UI update.
+    /// </summary>
+    public void MoveItem(int fromIndex, int toIndex)
+    {
+        _collection.MoveItem(fromIndex, toIndex);
+    }
+
+    /// <summary>
+    /// Removes an item at the specified index without full refresh.
+    /// Fires NotifyCollectionChangedAction.Remove for efficient UI update.
+    /// </summary>
+    public void RemoveItemAt(int index)
+    {
+        _collection.RemoveAt(index);
+    }
+
+    /// <summary>
     /// Sets a filter query on the datasource. All accesses to the datasource will be filtered according to this query.
     /// </summary>
     /// <param name="filterQuery">A Func that retrieves the query.</param>
