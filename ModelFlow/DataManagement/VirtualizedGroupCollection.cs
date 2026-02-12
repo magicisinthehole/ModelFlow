@@ -264,6 +264,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
                             if (existing != null)
                             {
                                 existing.UpdateGroupInfo(info);
+                                existing.UpdateGroupIndex(i);
                                 newGroups.Add(existing);
                             }
                             else
