@@ -826,12 +826,13 @@ namespace ModelFlow.DataVirtualization.DataManagement
         }
 
         /// <summary>
-        /// Gets the sorted insertion index for a new group based on the group key.
-        /// Uses binary search on the existing groups.
+        /// Gets the sorted insertion index for a new group.
+        /// Uses binary search with customizable comparison semantics.
         /// </summary>
         /// <param name="groupKey">The group key to find insertion position for.</param>
+        /// <param name="headerData">Optional header data for comparison.</param>
         /// <returns>The index where the group should be inserted.</returns>
-        public int GetGroupInsertionIndex(string groupKey)
+        public int GetGroupInsertionIndex(string groupKey, object? headerData = null)
         {
             var structure = _collection.GetLayoutStructure();
             if (structure == null || structure.Count == 0)
@@ -844,7 +845,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
             while (left <= right)
             {
                 int mid = (left + right) / 2;
-                int cmp = string.Compare(structure[mid].Key, groupKey, StringComparison.OrdinalIgnoreCase);
+                int cmp = CompareGroupForInsertion(structure[mid], groupKey, headerData);
 
                 if (cmp < 0)
                     left = mid + 1;
@@ -855,6 +856,23 @@ namespace ModelFlow.DataVirtualization.DataManagement
             }
 
             return left;
+        }
+
+        /// <summary>
+        /// Compares an existing group against a candidate group for insertion ordering.
+        /// Override to align insertion ordering with custom group sort semantics.
+        /// </summary>
+        /// <param name="existingGroup">Existing group in the current structure.</param>
+        /// <param name="newGroupKey">New group key being inserted.</param>
+        /// <param name="newHeaderData">Optional header data for the new group.</param>
+        /// <returns>
+        /// Negative if existing group sorts before new group,
+        /// positive if existing group sorts after new group,
+        /// zero if they are equivalent.
+        /// </returns>
+        protected virtual int CompareGroupForInsertion(GroupInfo existingGroup, string newGroupKey, object? newHeaderData)
+        {
+            return string.Compare(existingGroup.Key, newGroupKey, StringComparison.OrdinalIgnoreCase);
         }
 
         /// <summary>
