@@ -121,6 +121,17 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     }
 
     /// <summary>
+    /// Resets the data source to an empty state with HasGotCount=true and count=0.
+    /// Unlike Invalidate() which triggers a background re-fetch, this leaves the data source
+    /// ready for incremental inserts via InsertItem/InsertItemsAtIndex without a competing page load.
+    /// Use this when the underlying data was cleared and will be repopulated via insert notifications.
+    /// </summary>
+    public void ResetToEmpty()
+    {
+        _collection.ResetToKnownCount(0);
+    }
+
+    /// <summary>
     /// Moves an item from one index to another without full refresh.
     /// Fires NotifyCollectionChangedAction.Move for efficient UI update.
     /// </summary>

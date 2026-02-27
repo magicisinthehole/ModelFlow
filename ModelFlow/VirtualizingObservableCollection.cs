@@ -209,6 +209,28 @@
             InternalClear();
         }
 
+        /// <summary>
+        /// Resets the collection to a known count without triggering a background re-fetch.
+        /// Use this when the caller knows the exact item count (e.g., after a queue clear where count=0)
+        /// and will populate items incrementally via Insert calls.
+        /// Unlike Clear() which sets HasGotCount=false and triggers a re-fetch, this sets
+        /// HasGotCount=true so subsequent Insert operations work immediately.
+        /// </summary>
+        /// <param name="count">The known item count to reset to.</param>
+        public void ResetToKnownCount(int count)
+        {
+            if (Provider != null)
+            {
+                (Provider as IProviderPreReset)?.OnBeforeReset();
+                Provider.OnReset(count);
+            }
+            else
+            {
+                (ProviderAsync as IProviderPreReset)?.OnBeforeReset();
+                ProviderAsync.OnReset(count);
+            }
+        }
+
         /// <inheritdoc />
         /// <summary>
         ///     Determines whether the <see cref="T:System.Collections.Generic.ICollection`1" /> contains a specific value.
