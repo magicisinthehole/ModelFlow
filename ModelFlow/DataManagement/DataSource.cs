@@ -440,22 +440,21 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     }
 
     /// <summary>
-    /// Inserts multiple items at contiguous indices using BulkMode.
-    /// PaginationManager bookkeeping runs per item, but UI notifications are suppressed
-    /// until BulkMode disposes, which fires a single Reset + Count notification.
+    /// Inserts multiple items at contiguous indices with a single ranged Add notification.
+    /// PaginationManager bookkeeping runs per item, but only one CollectionChanged(Add)
+    /// fires at the end — unlike BulkMode which fires a Reset.
     /// </summary>
     /// <param name="startIndex">The index at which to begin inserting.</param>
     /// <param name="items">The items to insert in order.</param>
     public void InsertItemsAtIndex(int startIndex, IReadOnlyList<TViewModel> items)
     {
-        using (_collection.EnterBulkMode())
+        var dataItems = new List<DataItem<TViewModel>>(items.Count);
+        for (int i = 0; i < items.Count; i++)
         {
-            for (int i = 0; i < items.Count; i++)
-            {
-                var dataItem = DataItem.Create(items[i]);
-                _collection.Insert(startIndex + i, dataItem);
-            }
+            dataItems.Add(DataItem.Create(items[i]));
         }
+
+        _collection.InsertRange(startIndex, dataItems);
     }
 
     /// <summary>

@@ -950,6 +950,32 @@
             }
         }
 
+        /// <summary>
+        /// Inserts multiple items at contiguous indices with a single ranged Add notification.
+        /// PaginationManager bookkeeping runs per item, but only one CollectionChanged(Add)
+        /// fires at the end, avoiding the Reset that BulkMode would produce.
+        /// </summary>
+        /// <param name="startIndex">The index at which to begin inserting.</param>
+        /// <param name="items">The items to insert in order.</param>
+        internal void InsertRange(int startIndex, IList<T> items)
+        {
+            var edit = GetProviderAsEditable();
+
+            for (int i = 0; i < items.Count; i++)
+            {
+                edit.OnInsert(startIndex + i, items[i], null);
+            }
+
+            OnCountTouched();
+
+            if (!IsSourceObservable)
+            {
+                var args = new NotifyCollectionChangedEventArgs(
+                    NotifyCollectionChangedAction.Add, items, startIndex);
+                RaiseCollectionChangedEvent(args);
+            }
+        }
+
         private bool InternalMoveItem(int oldIndex, int newIndex, object timestamp = null)
         {
             if (!(Provider is IEditableProviderIndexBased<T> edit)) return false;
