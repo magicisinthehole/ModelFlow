@@ -16,12 +16,14 @@
 
         private bool _processing;
 
+        private volatile bool _processingSignalPending;
+
         private Func<Action, Task>? _uiThreadExcecuteAction;
 
         public static VirtualizationManager Instance { get; } = new VirtualizationManager();
 
         public static bool IsInitialized { get; private set; }
-        
+
         public static IScheduler? UiThreadScheduler { get; set; }
 
         public static TimeSpan PropertySyncThrottleTime { get; set; } = TimeSpan.FromMilliseconds(400);
@@ -36,11 +38,23 @@
             }
         }
 
+        /// <summary>
+        /// Callback invoked when actions are queued and processing is needed.
+        /// The host should call ProcessActions() on the UI thread in response.
+        /// </summary>
+        public Action? RequestProcessing { get; set; }
+
         internal void AddAction(IVirtualizationAction action)
         {
             lock (_actionLock)
             {
                 _actions.Add(action);
+            }
+
+            if (!_processingSignalPending)
+            {
+                _processingSignalPending = true;
+                RequestProcessing?.Invoke();
             }
         }
 
@@ -51,6 +65,8 @@
 
         public void ProcessActions()
         {
+            _processingSignalPending = false;
+
             if (_processing) return;
 
             _processing = true;
@@ -104,6 +120,28 @@
             }
 
             _processing = false;
+        }
+
+        /// <summary>
+        /// Returns the delay until the next repeating action is due,
+        /// or null if no repeating actions exist.
+        /// </summary>
+        public TimeSpan? GetNextDueDelay()
+        {
+            lock (_actionLock)
+            {
+                TimeSpan? shortest = null;
+                foreach (var action in _actions)
+                {
+                    if (action is IRepeatingVirtualizationAction repeating)
+                    {
+                        var delay = repeating.GetTimeUntilDue();
+                        if (shortest == null || delay < shortest)
+                            shortest = delay;
+                    }
+                }
+                return shortest;
+            }
         }
 
         private void RunOnUi(IVirtualizationAction action)

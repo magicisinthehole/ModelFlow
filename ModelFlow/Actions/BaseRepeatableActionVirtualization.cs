@@ -67,5 +67,12 @@
         {
             return IsRepeating;
         }
+
+        public TimeSpan GetTimeUntilDue()
+        {
+            var nextDue = LastRun.Add(RepeatingSchedule);
+            var remaining = nextDue - DateTime.Now;
+            return remaining > TimeSpan.Zero ? remaining : TimeSpan.Zero;
+        }
     }
 }
