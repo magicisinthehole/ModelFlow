@@ -492,7 +492,8 @@
         {
             var threshold = Math.Max(1, PageSize / 2);
             var totalCount = GetCount(false);
-            var maxPage = _basePage + (totalCount - 1) / PageSize;
+            if (totalCount <= 0) return;
+            CalculateFromIndex(totalCount - 1, out var maxPage, out _);
 
             // In the second half of this page → prefetch next
             if (offset >= PageSize - threshold)
@@ -1188,10 +1189,9 @@
             }
 
             CalculateFromIndex(index, out var page, out var offset);
-            
-            
+
             var dataPage = SafeGetPage(page, _getVoc(), index);
-            
+
             dataPage.InsertAt(offset, item, timestamp, ExpiryComparer);
 
             var adj = AddOrUpdateAdjustment(page, 1);
