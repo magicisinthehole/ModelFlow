@@ -548,7 +548,7 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     /// <param name="filterSortQuery">A query to run on the datasource that filters and then sorts the data.</param>
     /// <returns>returns an IEnumerable of <see cref="TModel"/>s</returns>
     protected abstract Task<IEnumerable<TModel>> GetItemsAtAsync(int offset, int count,
-        Func<IQueryable<TModel>, IQueryable<TModel>> filterSortQuery);
+        Func<IQueryable<TModel>, IQueryable<TModel>> filterSortQuery, CancellationToken cancellationToken = default);
 
     /// <summary>
     /// Retrieves a single row from the datasource.
@@ -1058,12 +1058,14 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     }
 
     async Task<IEnumerable<DataItem<TViewModel>>> IPagedSourceProviderAsync<DataItem<TViewModel>>.GetItemsAtAsync(ISourcePage<DataItem<TViewModel>> page,
-        int offset, int count, Action? signal)
+        int offset, int count, Action? signal, CancellationToken cancellationToken)
     {
         StartOperation();
         var filter = _filterQuery;
         signal?.Invoke();
-        var items = (await GetItemsAtAsync(offset, count, x => BuildFilterSortQuery(x, filter))).ToList();
+        var items = (await GetItemsAtAsync(offset, count, x => BuildFilterSortQuery(x, filter), cancellationToken)).ToList();
+
+        cancellationToken.ThrowIfCancellationRequested();
 
         if (items.Count != count)
         {

@@ -2,6 +2,7 @@ namespace ModelFlow.DataVirtualization.Interfaces
 {
     using System;
     using System.Collections.Generic;
+    using System.Threading;
     using System.Threading.Tasks;
 
     /// <summary>
@@ -32,7 +33,7 @@ namespace ModelFlow.DataVirtualization.Interfaces
         /// <param name="offset">Offset within the group.</param>
         /// <param name="count">Number of items to fetch.</param>
         /// <param name="signal">Optional signal callback when filter is captured.</param>
-        Task<IEnumerable<T>> GetGroupItemsAsync(ISourcePage<T> page, int groupIndex, int offset, int count, Action? signal = null);
+        Task<IEnumerable<T>> GetGroupItemsAsync(ISourcePage<T> page, int groupIndex, int offset, int count, Action? signal = null, CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Gets the total item count for a specific group.

@@ -297,9 +297,9 @@ namespace ModelFlow.DataVirtualization.DataManagement
                 maxPages: _maxItemPagesPerGroup);
         }
 
-        private async Task<IEnumerable<DataItem<T>>> FetchGroupItems(ISourcePage<DataItem<T>> page, int groupIndex, int offset, int count, Action? signal)
+        private async Task<IEnumerable<DataItem<T>>> FetchGroupItems(ISourcePage<DataItem<T>> page, int groupIndex, int offset, int count, Action? signal, CancellationToken cancellationToken = default)
         {
-            var result = await _provider.GetGroupItemsAsync(page, groupIndex, offset, count, signal);
+            var result = await _provider.GetGroupItemsAsync(page, groupIndex, offset, count, signal, cancellationToken);
 
             // Mark this group as prefetched (its first page is now loaded)
             if (offset == 0)

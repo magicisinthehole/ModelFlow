@@ -2,6 +2,7 @@
 {
     using System;
     using System.Collections.Generic;
+    using System.Threading;
     using System.Threading.Tasks;
 
     internal interface IPagedSourceProviderAsync<T> :  IBaseSourceProvider
@@ -12,7 +13,7 @@
 
         Task<int> GetCountAsync();
 
-        Task<IEnumerable<T>> GetItemsAtAsync(ISourcePage<T> page, int offset, int count, Action? signal);
+        Task<IEnumerable<T>> GetItemsAtAsync(ISourcePage<T> page, int offset, int count, Action? signal, CancellationToken cancellationToken = default);
 
         T GetPlaceHolder(int index, int page, int offset);
 

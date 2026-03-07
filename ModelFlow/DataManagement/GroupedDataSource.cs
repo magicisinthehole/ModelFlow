@@ -300,7 +300,8 @@ namespace ModelFlow.DataVirtualization.DataManagement
             string groupKey,
             int offset,
             int count,
-            Func<IQueryable<TModel>, IQueryable<TModel>> filterSortQuery);
+            Func<IQueryable<TModel>, IQueryable<TModel>> filterSortQuery,
+            CancellationToken cancellationToken = default);
 
         /// <summary>
         /// Gets a placeholder view model for loading state.
@@ -1000,13 +1001,15 @@ namespace ModelFlow.DataVirtualization.DataManagement
         }
 
         async Task<IEnumerable<DataItem<TViewModel>>> IGroupedSourceProviderAsync<DataItem<TViewModel>>.GetGroupItemsAsync(
-            ISourcePage<DataItem<TViewModel>> page, int groupIndex, int offset, int count, Action? signal)
+            ISourcePage<DataItem<TViewModel>> page, int groupIndex, int offset, int count, Action? signal, CancellationToken cancellationToken)
         {
             StartOperation();
             try
             {
                 // Wait for structure to be loaded to avoid race condition
                 await _collection.EnsureStructureLoadedAsync();
+
+                cancellationToken.ThrowIfCancellationRequested();
 
                 var structure = _collection.GetLayoutStructure();
                 if (structure == null || groupIndex >= structure.Count)
@@ -1018,7 +1021,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
                 var filter = _filterQuery;
                 signal?.Invoke();
 
-                var models = (await GetGroupItemsAsync(groupKey, offset, count, x => BuildFilterSortQuery(x, filter))).ToList();
+                var models = (await GetGroupItemsAsync(groupKey, offset, count, x => BuildFilterSortQuery(x, filter), cancellationToken)).ToList();
 
                 if (models.Count != count)
                 {

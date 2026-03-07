@@ -73,7 +73,7 @@ public class RemoteOrDbDataSource : DataSource<RemoteItemViewModel, RemoteOrDbDa
         return await _remoteDatas.GetRowCountAsync(filterQuery);
     }
 
-    protected override async Task<IEnumerable<RemoteOrDbDataItem>> GetItemsAtAsync(int offset, int count, Func<IQueryable<RemoteOrDbDataItem>, IQueryable<RemoteOrDbDataItem>> filterSortQuery)
+    protected override async Task<IEnumerable<RemoteOrDbDataItem>> GetItemsAtAsync(int offset, int count, Func<IQueryable<RemoteOrDbDataItem>, IQueryable<RemoteOrDbDataItem>> filterSortQuery, CancellationToken cancellationToken = default)
     {
         await Task.Delay(250);
 

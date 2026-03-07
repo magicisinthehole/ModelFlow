@@ -20,7 +20,6 @@
         private readonly Dictionary<int, PageDelta> _deltas = new Dictionary<int, PageDelta>();
         private readonly Dictionary<int, ISourcePage<T>> _pages = new Dictionary<int, ISourcePage<T>>();
         private readonly IPageReclaimer<T> _reclaimer;
-        private AutoResetEvent _filterCaptureSignal = new AutoResetEvent(false);
 
         private readonly Dictionary<int, CancellationTokenSource> _tasks =
             new Dictionary<int, CancellationTokenSource>();
@@ -475,7 +474,68 @@
                 return ret;
             }
 
+            // Prefetch adjacent page when near the edge of the current page
+            if (voc != null && IsAsync)
+            {
+                PrefetchAdjacentPages(page, offset, voc);
+            }
+
             return ret;
+        }
+
+        /// <summary>
+        /// Proactively fetches the next/previous page when the access offset is
+        /// within the outer half of the current page, so data is ready before
+        /// the user scrolls past the boundary.
+        /// </summary>
+        private void PrefetchAdjacentPages(int currentPage, int offset, object voc)
+        {
+            var threshold = Math.Max(1, PageSize / 2);
+            var totalCount = GetCount(false);
+            var maxPage = _basePage + (totalCount - 1) / PageSize;
+
+            // In the second half of this page → prefetch next
+            if (offset >= PageSize - threshold)
+            {
+                var nextPage = currentPage + 1;
+                if (nextPage <= maxPage)
+                    EnsurePageLoading(nextPage, voc);
+            }
+
+            // In the first half of this page → prefetch previous
+            if (offset < threshold)
+            {
+                var prevPage = currentPage - 1;
+                if (prevPage >= _basePage)
+                    EnsurePageLoading(prevPage, voc);
+            }
+        }
+
+        /// <summary>
+        /// Starts an async page fetch if the page is not already loaded or in-flight.
+        /// </summary>
+        private void EnsurePageLoading(int page, object voc)
+        {
+            lock (PageLock)
+            {
+                if (_pages.ContainsKey(page) || _tasks.ContainsKey(page))
+                    return;
+
+                var newPage = CreateNewPage(page, out var pageSize, out var pageOffset);
+                if (pageSize <= 0) return;
+
+                for (var i = 0; i < pageSize; i++)
+                {
+                    var placeHolder = ProviderAsync.GetPlaceHolder(newPage.Page * pageSize + i, newPage.Page, i);
+                    newPage.Append(placeHolder, null, ExpiryComparer);
+                }
+
+                var cts = StartPageRequest(page);
+                Task.Run(async () =>
+                {
+                    await DoRealPageGet(voc, newPage, pageOffset, pageOffset, cts);
+                }, cts.Token).ConfigureAwait(false);
+            }
         }
 
 
@@ -578,6 +638,40 @@
                 catch (Exception)
                 {
                     // Removal may fail if not present - ignore
+                }
+            }
+        }
+
+        /// <summary>
+        /// Cancels in-flight page requests for pages not adjacent to the target page.
+        /// Also removes those pages from the page dictionary so they don't consume
+        /// maxPages budget with stale placeholder data.
+        /// Called when a new on-demand page is created during fast scrolling.
+        /// </summary>
+        private void CancelDistantRequests(int targetPage)
+        {
+            // Already inside PageLock from SafeGetPage
+            // Snapshot keys to avoid modifying collection during iteration
+            var buffer = new int[_tasks.Count];
+            var count = 0;
+            foreach (var p in _tasks.Keys)
+            {
+                if (p != int.MinValue && Math.Abs(p - targetPage) > 1)
+                    buffer[count++] = p;
+            }
+
+            for (var i = 0; i < count; i++)
+            {
+                var page = buffer[i];
+                var cts = _tasks[page];
+                cts.Cancel();
+                cts.Dispose();
+                _tasks.Remove(page);
+
+                if (_pages.TryGetValue(page, out var stalePageObj) && page != _basePage)
+                {
+                    _reclaimer.OnPageReleased(stalePageObj);
+                    _pages.Remove(page);
                 }
             }
         }
@@ -979,6 +1073,8 @@
                 }
                 else
                 {
+                    CancelDistantRequests(page);
+
                     var newPage = CreateNewPage(page, out var pageSize, out var pageOffset);
 
                     if (!IsAsync)
@@ -991,7 +1087,6 @@
                     {
                         if (voc != null)
                         {
-                            // Fill with placeholders
                             for (var loop = 0; loop < pageSize; loop++)
                             {
                                 var placeHolder = ProviderAsync.GetPlaceHolder(newPage.Page * pageSize + loop,
@@ -1002,17 +1097,14 @@
                             ret = newPage;
 
                             var cts = StartPageRequest(newPage.Page);
-                            _filterCaptureSignal.Reset();
                             Task.Run(async () =>
                                 {
-                                    await DoRealPageGet(voc, newPage, pageOffset, index, () => _filterCaptureSignal.Set(), cts);
+                                    await DoRealPageGet(voc, newPage, pageOffset, index, cts);
                                 }, cts.Token)
                                 .ConfigureAwait(false);
-                            _filterCaptureSignal.WaitOne();
                         }
                         else
                         {
-                            //FillPageFromAsyncProvider(newPage, pageOffset);
                             ret = newPage;
                         }
                     }
@@ -1044,7 +1136,7 @@
             return newPage;
         }
 
-        private async Task DoRealPageGet(object voc, ISourcePage<T> page, int pageOffset, int index, Action signal,
+        private async Task DoRealPageGet(object voc, ISourcePage<T> page, int pageOffset, int index,
             CancellationTokenSource cts)
         {
             if (cts.IsCancellationRequested)
@@ -1052,26 +1144,23 @@
                 return;
             }
 
-            var data = new PagedSourceItemsPacket<T>(await ProviderAsync.GetItemsAtAsync(page, pageOffset, page.ItemsPerPage, signal));
-
-            if (cts.IsCancellationRequested)
+            try
             {
-                return;
-            }
+                var data = new PagedSourceItemsPacket<T>(await ProviderAsync.GetItemsAtAsync(page, pageOffset, page.ItemsPerPage, null, cts.Token));
 
-            page.WiredDateTime = data.LoadedAt;
-            page.PageFetchState = PageFetchStateEnum.Fetched;
-
-            VirtualizationManager.Instance.RunOnUi(() =>
-            {
                 if (cts.IsCancellationRequested)
                 {
-                    RemovePageRequest(page.Page);
                     return;
                 }
-            });
 
-            RemovePageRequest(page.Page);
+                page.WiredDateTime = data.LoadedAt;
+                page.PageFetchState = PageFetchStateEnum.Fetched;
+                RemovePageRequest(page.Page);
+            }
+            catch (OperationCanceledException)
+            {
+                RemovePageRequest(page.Page);
+            }
         }
 
         protected bool IsPageWired(int page)

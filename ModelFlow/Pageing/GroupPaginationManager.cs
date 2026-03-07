@@ -18,14 +18,13 @@ namespace ModelFlow.DataVirtualization.Pageing
     internal class GroupPaginationManager<T> where T : DataItem, IDataItem
     {
         private int _groupIndex;
-        private readonly Func<ISourcePage<T>, int, int, int, Action?, Task<IEnumerable<T>>> _fetchItems;
+        private readonly Func<ISourcePage<T>, int, int, int, Action?, CancellationToken, Task<IEnumerable<T>>> _fetchItems;
         private readonly Func<int, int, int, int, T> _getPlaceholder;
         private readonly Dictionary<int, ISourcePage<T>> _pages = new Dictionary<int, ISourcePage<T>>();
         private readonly Dictionary<int, PageDelta> _deltas = new Dictionary<int, PageDelta>();
         private readonly Dictionary<int, CancellationTokenSource> _tasks = new Dictionary<int, CancellationTokenSource>();
         private readonly IPageReclaimer<T> _reclaimer;
         protected object PageLock = new object();
-        private readonly AutoResetEvent _filterCaptureSignal = new AutoResetEvent(false);
 
         private int _basePage;
         private int _itemCount;
@@ -53,7 +52,7 @@ namespace ModelFlow.DataVirtualization.Pageing
         public GroupPaginationManager(
             int groupIndex,
             int itemCount,
-            Func<ISourcePage<T>, int, int, int, Action?, Task<IEnumerable<T>>> fetchItems,
+            Func<ISourcePage<T>, int, int, int, Action?, CancellationToken, Task<IEnumerable<T>>> fetchItems,
             Func<int, int, int, int, T> getPlaceholder,
             IPageReclaimer<T>? reclaimer = null,
             IPageExpiryComparer? expiryComparer = null,
@@ -642,11 +641,9 @@ namespace ModelFlow.DataVirtualization.Pageing
                     newPage.Append(placeholder, null, ExpiryComparer);
                 }
 
-                // Start async fetch with filter capture signal
                 var cts = StartPageRequest(pageNum);
-                _filterCaptureSignal.Reset();
-                _ = Task.Run(async () => await FetchPageAsync(newPage, pageOffset, pageSize, () => _filterCaptureSignal.Set(), cts), cts.Token);
-                _filterCaptureSignal.WaitOne(); // Wait for filter capture before returning
+                Task.Run(async () => await FetchPageAsync(newPage, pageOffset, pageSize, null, cts, cts.Token), cts.Token)
+                    .ConfigureAwait(false);
 
                 return newPage;
             }
@@ -666,16 +663,13 @@ namespace ModelFlow.DataVirtualization.Pageing
             return offset;
         }
 
-        private async Task FetchPageAsync(ISourcePage<T> page, int offset, int count, Action signal, CancellationTokenSource cts)
+        private async Task FetchPageAsync(ISourcePage<T> page, int offset, int count, Action signal, CancellationTokenSource cts, CancellationToken cancellationToken)
         {
             if (cts.IsCancellationRequested) return;
 
             try
             {
-                // Pass the page to the provider - the provider will materialize items in place
-                // via SetItem() on the existing placeholders. The signal is invoked once the
-                // filter is captured so we can return with placeholders immediately.
-                await _fetchItems(page, _groupIndex, offset, count, signal);
+                await _fetchItems(page, _groupIndex, offset, count, signal, cancellationToken);
 
                 if (cts.IsCancellationRequested) return;
 
@@ -688,6 +682,10 @@ namespace ModelFlow.DataVirtualization.Pageing
                     if (cts.IsCancellationRequested) return;
                     page.PageFetchState = PageFetchStateEnum.Fetched;
                 }));
+            }
+            catch (OperationCanceledException)
+            {
+                // Expected when page is cancelled during a fast scroll
             }
             finally
             {

@@ -3,6 +3,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
     using System;
     using System.Collections;
     using System.Collections.Generic;
+    using System.Threading;
     using System.Threading.Tasks;
     using Interfaces;
     using Pageing;
@@ -33,7 +34,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
         internal VirtualizedGroup(
             int groupIndex,
             GroupInfo groupInfo,
-            Func<ISourcePage<DataItem<T>>, int, int, int, Action?, Task<IEnumerable<DataItem<T>>>> fetchItems,
+            Func<ISourcePage<DataItem<T>>, int, int, int, Action?, CancellationToken, Task<IEnumerable<DataItem<T>>>> fetchItems,
             Func<int, int, int, int, DataItem<T>> getPlaceholder,
             IPageReclaimer<DataItem<T>>? reclaimer = null,
             IPageExpiryComparer? expiryComparer = null,
