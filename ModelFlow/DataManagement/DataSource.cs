@@ -180,6 +180,11 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     /// </summary>
     public IReadOnlyObservableCollection<DataItem<TViewModel>> Collection => _collection;
 
+    /// <summary>
+    /// Gets the configured page size used by the underlying pagination manager.
+    /// </summary>
+    public int PageSize => _collection.PageSize;
+
     public override IEnumerable DataCollection => Collection;
 
     /// <summary>
@@ -229,18 +234,23 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     /// <returns>True if the item was found and updated, false otherwise.</returns>
     public bool UpdateItem(Func<TViewModel, bool> predicate, TViewModel updatedItem)
     {
-        // Use index-based iteration with IsIndexLoaded check to avoid triggering page loads
+        // Use index-based iteration with in-memory checks to avoid triggering page loads
         // for unloaded pages. The old foreach approach called GetAt for every index,
         // which triggers page loads even for items we'd skip due to IsLoading check.
         var count = _collection.Count;
         for (int i = 0; i < count; i++)
         {
-            // Skip unloaded indices - don't trigger page loads
-            if (!_collection.IsIndexLoaded(i))
+            // Skip indices not currently represented in memory - don't trigger page loads
+            if (!_collection.HasIndexInMemory(i))
                 continue;
 
-            var dataItem = _collection[i];
-            if (!dataItem.IsLoading && dataItem.Item != null && predicate(dataItem.Item))
+            if (!_collection.TryGetInMemoryValue(i, out var dataItem))
+                continue;
+
+            if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                continue;
+
+            if (predicate(dataItem.Item))
             {
                 dataItem.UpdateItem(updatedItem);
                 return true;
@@ -260,18 +270,23 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     /// <returns>True if the item was found and the action was called, false otherwise.</returns>
     public bool MutateItem(Func<TViewModel, bool> predicate, Action<TViewModel> action)
     {
-        // Use index-based iteration with IsIndexLoaded check to avoid triggering page loads
+        // Use index-based iteration with in-memory checks to avoid triggering page loads
         // for unloaded pages. The old foreach approach called GetAt for every index,
         // which triggers page loads even for items we'd skip due to IsLoading check.
         var count = _collection.Count;
         for (int i = 0; i < count; i++)
         {
-            // Skip unloaded indices - don't trigger page loads
-            if (!_collection.IsIndexLoaded(i))
+            // Skip indices not currently represented in memory - don't trigger page loads
+            if (!_collection.HasIndexInMemory(i))
                 continue;
 
-            var dataItem = _collection[i];
-            if (!dataItem.IsLoading && dataItem.Item != null && predicate(dataItem.Item))
+            if (!_collection.TryGetInMemoryValue(i, out var dataItem))
+                continue;
+
+            if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                continue;
+
+            if (predicate(dataItem.Item))
             {
                 action(dataItem.Item);
                 return true;
@@ -315,19 +330,24 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     /// <returns>True if an item was found and removed, false otherwise.</returns>
     public bool RemoveItem(Func<TViewModel, bool> predicate)
     {
-        // Use index-based iteration with IsIndexLoaded check to avoid triggering page loads
+        // Use index-based iteration with in-memory checks to avoid triggering page loads
         // for unloaded pages. The old foreach approach called GetAt for every index,
         // which triggers page loads even for items we'd skip due to IsLoading check.
         DataItem<TViewModel>? toRemove = null;
         var count = _collection.Count;
         for (int i = 0; i < count; i++)
         {
-            // Skip unloaded indices - don't trigger page loads
-            if (!_collection.IsIndexLoaded(i))
+            // Skip indices not currently represented in memory - don't trigger page loads
+            if (!_collection.HasIndexInMemory(i))
                 continue;
 
-            var dataItem = _collection[i];
-            if (!dataItem.IsLoading && predicate(dataItem.Item))
+            if (!_collection.TryGetInMemoryValue(i, out var dataItem))
+                continue;
+
+            if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                continue;
+
+            if (predicate(dataItem.Item))
             {
                 toRemove = dataItem;
                 break;
@@ -342,6 +362,33 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     }
 
     /// <summary>
+    /// Finds the index of the first loaded item matching the predicate without triggering page loads.
+    /// Returns null if the item is not currently materialized in memory.
+    /// </summary>
+    public int? FindLoadedIndex(Func<TViewModel, bool> predicate)
+    {
+        var count = _collection.Count;
+        for (int i = 0; i < count; i++)
+        {
+            if (!_collection.HasIndexInMemory(i))
+                continue;
+
+            if (!_collection.TryGetInMemoryValue(i, out var dataItem))
+                continue;
+
+            if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                continue;
+
+            if (predicate(dataItem.Item))
+            {
+                return i;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
     /// Finds the first item matching the predicate.
     /// Use this to get a reference to an item for direct property updates.
     /// Only searches loaded pages - does not trigger page loads for unloaded pages.
@@ -350,18 +397,23 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     /// <returns>The item if found, null otherwise.</returns>
     public TViewModel? FindItem(Func<TViewModel, bool> predicate)
     {
-        // Use index-based iteration with IsIndexLoaded check to avoid triggering page loads
+        // Use index-based iteration with in-memory checks to avoid triggering page loads
         // for unloaded pages. The old foreach approach called GetAt for every index,
         // which triggers page loads even for items we'd skip due to IsLoading check.
         var count = _collection.Count;
         for (int i = 0; i < count; i++)
         {
-            // Skip unloaded indices - don't trigger page loads
-            if (!_collection.IsIndexLoaded(i))
+            // Skip indices not currently represented in memory - don't trigger page loads
+            if (!_collection.HasIndexInMemory(i))
                 continue;
 
-            var dataItem = _collection[i];
-            if (!dataItem.IsLoading && dataItem.Item != null && predicate(dataItem.Item))
+            if (!_collection.TryGetInMemoryValue(i, out var dataItem))
+                continue;
+
+            if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                continue;
+
+            if (predicate(dataItem.Item))
             {
                 return dataItem.Item;
             }
@@ -370,27 +422,142 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     }
 
     /// <summary>
-    /// Gets all currently loaded (non-placeholder) items.
+    /// Gets all currently materialized (non-placeholder) items.
     /// Useful for iterating over cached items without triggering page loads.
-    /// Only returns items from loaded pages.
+    /// Only returns items from pages currently present in memory.
     /// </summary>
     public IEnumerable<TViewModel> GetLoadedItems()
     {
-        // Use index-based iteration with IsIndexLoaded check to avoid triggering page loads
+        // Use index-based iteration with in-memory checks to avoid triggering page loads
         // for unloaded pages. The old foreach approach called GetAt for every index,
         // which triggers page loads even for items we'd skip due to IsLoading check.
         var count = _collection.Count;
         for (int i = 0; i < count; i++)
         {
-            // Skip unloaded indices - don't trigger page loads
-            if (!_collection.IsIndexLoaded(i))
+            // Skip indices not currently represented in memory - don't trigger page loads
+            if (!_collection.HasIndexInMemory(i))
                 continue;
 
-            var dataItem = _collection[i];
+            if (!_collection.TryGetInMemoryValue(i, out var dataItem))
+                continue;
+
+            if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                continue;
+
             if (!dataItem.IsLoading)
             {
                 yield return dataItem.Item;
             }
+        }
+    }
+
+    /// <summary>
+    /// Gets the contiguous index ranges that are currently fully loaded.
+    /// Placeholder-backed pages are excluded so reload/repair logic does not keep
+    /// refetching partially materialized windows during active updates.
+    /// </summary>
+    public IReadOnlyList<(int StartIndex, int Count)> GetLoadedRanges()
+    {
+        if (!_collection.HasGotCount)
+        {
+            return Array.Empty<(int StartIndex, int Count)>();
+        }
+
+        var ranges = new List<(int StartIndex, int Count)>();
+        var count = _collection.Count;
+        var rangeStart = -1;
+
+        for (int i = 0; i < count; i++)
+        {
+            var isLoaded = _collection.IsIndexLoaded(i);
+            if (isLoaded)
+            {
+                if (rangeStart < 0)
+                {
+                    rangeStart = i;
+                }
+
+                continue;
+            }
+
+            if (rangeStart >= 0)
+            {
+                ranges.Add((rangeStart, i - rangeStart));
+                rangeStart = -1;
+            }
+        }
+
+        if (rangeStart >= 0)
+        {
+            ranges.Add((rangeStart, count - rangeStart));
+        }
+
+        return ranges;
+    }
+
+    /// <summary>
+    /// Rehydrates the currently materialized ranges in place without invalidating the data source.
+    /// This preserves the active virtualization state while repairing boundary-crossing updates.
+    /// </summary>
+    public async Task ReloadLoadedRangesAsync(CancellationToken cancellationToken = default)
+    {
+        var ranges = GetLoadedRanges();
+        if (ranges.Count == 0)
+        {
+            return;
+        }
+
+        StartOperation();
+        try
+        {
+            var filter = _filterQuery;
+
+            foreach (var range in ranges)
+            {
+                var models = (await GetItemsAtAsync(
+                        range.StartIndex,
+                        range.Count,
+                        x => BuildFilterSortQuery(x, filter),
+                        cancellationToken))
+                    .ToList();
+
+                cancellationToken.ThrowIfCancellationRequested();
+
+                if (models.Count != range.Count)
+                {
+                    throw new InvalidOperationException(
+                        $"ReloadLoadedRangesAsync expected {range.Count} items at offset {range.StartIndex} " +
+                        $"but received {models.Count} in {GetType().Name}.");
+                }
+
+                var completionSource = new TaskCompletionSource<bool>();
+                await VirtualizationManager.Instance.RunOnUiAsync(new ActionVirtualizationWrapper(async () =>
+                {
+                    for (int i = 0; i < models.Count; i++)
+                    {
+                        var index = range.StartIndex + i;
+                        if (!_collection.HasIndexInMemory(index))
+                        {
+                            continue;
+                        }
+
+                        if (!_collection.TryGetInMemoryValue(index, out var wrapper) || wrapper == null)
+                        {
+                            continue;
+                        }
+
+                        await Materialize(wrapper, models[i]);
+                    }
+
+                    completionSource.TrySetResult(true);
+                }));
+
+                await completionSource.Task;
+            }
+        }
+        finally
+        {
+            EndOperation();
         }
     }
 
@@ -421,13 +588,114 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     }
 
     /// <summary>
+    /// Checks if the index falls within a page currently present in memory,
+    /// including placeholder pages that are still being fetched.
+    /// </summary>
+    public bool HasIndexInMemory(int index)
+    {
+        return _collection.HasIndexInMemory(index);
+    }
+
+    /// <summary>
+    /// Checks whether the specified in-memory slot is still backed by a placeholder wrapper.
+    /// </summary>
+    public bool IsPlaceholderAtIndex(int index)
+    {
+        if (!_collection.HasIndexInMemory(index))
+        {
+            return false;
+        }
+
+        if (!_collection.TryGetInMemoryValue(index, out var dataItem))
+        {
+            return false;
+        }
+
+        return dataItem == null || dataItem.IsLoading || dataItem.Item == null;
+    }
+
+    /// <summary>
+    /// Finds the first currently in-memory placeholder slot.
+    /// </summary>
+    public int? FindPlaceholderIndex(bool fromEnd = false)
+    {
+        var count = _collection.Count;
+        if (!fromEnd)
+        {
+            for (int i = 0; i < count; i++)
+            {
+                if (IsPlaceholderAtIndex(i))
+                {
+                    return i;
+                }
+            }
+
+            return null;
+        }
+
+        for (int i = count - 1; i >= 0; i--)
+        {
+            if (IsPlaceholderAtIndex(i))
+            {
+                return i;
+            }
+        }
+
+        return null;
+    }
+
+    /// <summary>
+    /// Inserts an item into the current in-memory window without changing the collection count
+    /// by consuming a later placeholder slot in the same contiguous in-memory segment.
+    /// Returns false if no suitable placeholder slot exists.
+    /// </summary>
+    public bool TrySpliceItemByConsumingLaterPlaceholder(int index, TViewModel item)
+    {
+        if (!_collection.HasIndexInMemory(index))
+        {
+            return false;
+        }
+
+        if (IsPlaceholderAtIndex(index))
+        {
+            return ReplaceItemAtIndex(index, item);
+        }
+
+        var segmentEnd = index;
+        var count = _collection.Count;
+        while (segmentEnd + 1 < count && _collection.HasIndexInMemory(segmentEnd + 1))
+        {
+            segmentEnd++;
+        }
+
+        int? placeholderIndex = null;
+        for (int i = segmentEnd; i > index; i--)
+        {
+            if (IsPlaceholderAtIndex(i))
+            {
+                placeholderIndex = i;
+                break;
+            }
+        }
+
+        if (!placeholderIndex.HasValue)
+        {
+            return false;
+        }
+
+        _collection.MoveItem(placeholderIndex.Value, index);
+        _collection[index] = DataItem.Create(item);
+        return true;
+    }
+
+    /// <summary>
     /// Gets whether the data source has fetched its count from the underlying source.
     /// </summary>
     public bool HasGotCount => _collection.HasGotCount;
 
     /// <summary>
     /// Inserts an item at a specific index without invalidating.
-    /// Only call this if IsIndexLoaded(index) returns true.
+    /// Only call this if HasIndexInMemory(index) returns true.
     /// </summary>
     /// <param name="index">The sorted index to insert at.</param>
     /// <param name="item">The item to insert.</param>
@@ -437,6 +705,59 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
         var dataItem = DataItem.Create(item);
         _collection.Insert(index, dataItem);  // Uses existing Insert method
         return dataItem;
+    }
+
+    /// <summary>
+    /// Replaces the item wrapper at the specified in-memory index without changing the collection count.
+    /// This is valid for both loaded rows and placeholder-backed slots that need materializing.
+    /// </summary>
+    public bool ReplaceItemAtIndex(int index, TViewModel item)
+    {
+        if (!_collection.HasIndexInMemory(index))
+        {
+            return false;
+        }
+
+        _collection[index] = DataItem.Create(item);
+        return true;
+    }
+
+    /// <summary>
+    /// Gets the currently materialized item at the specified index without triggering page loads.
+    /// Returns null if the slot is not currently materialized or is still a placeholder.
+    /// </summary>
+    public TViewModel? GetLoadedItemAtIndex(int index)
+    {
+        if (!_collection.HasIndexInMemory(index))
+        {
+            return default;
+        }
+
+        if (!_collection.TryGetInMemoryValue(index, out var dataItem))
+        {
+            return default;
+        }
+
+        if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+        {
+            return default;
+        }
+
+        return dataItem.Item;
+    }
+
+    /// <summary>
+    /// Gets the in-memory wrapper at the specified index without triggering page loads.
+    /// Returns null if the slot is not currently backed by an in-memory page.
+    /// </summary>
+    public DataItem<TViewModel>? GetInMemoryDataItemAtIndex(int index)
+    {
+        if (!_collection.HasIndexInMemory(index))
+        {
+            return null;
+        }
+
+        return _collection.TryGetInMemoryValue(index, out var dataItem) ? dataItem : null;
     }
 
     /// <summary>
@@ -876,7 +1197,27 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
 
     private async Task<DataItem<TViewModel>> Materialize(ISourcePage<DataItem<TViewModel>> page, int pageIndex, TModel item)
     {
-        return await Materialize(page.GetAt(pageIndex), item);
+        var wrapper = page.GetAt(pageIndex);
+        if (wrapper == null)
+        {
+            var materialized = _selector(item);
+            await InitializeItemAsync(materialized);
+
+            wrapper = DataItem.Create(materialized);
+            if (pageIndex < page.ItemsCount)
+            {
+                page.ReplaceAt(pageIndex, wrapper, null, null);
+            }
+            else
+            {
+                page.InsertAt(pageIndex, wrapper, null, null);
+            }
+
+            OnMaterializedInternal(wrapper);
+            return wrapper;
+        }
+
+        return await Materialize(wrapper, item);
     }
 
     private async Task<DataItem<TViewModel>> Materialize(TModel item)

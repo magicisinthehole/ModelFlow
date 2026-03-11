@@ -23,6 +23,7 @@
         int Append(T item, object updatedAt, IPageExpiryComparer comparer);
 
         T GetAt(int offset);
+        T PeekAt(int offset);
 
         int IndexOf(T item);
 

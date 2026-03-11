@@ -106,7 +106,37 @@ namespace ModelFlow.DataVirtualization.Pageing
             CalculateFromIndex(index, out var page, out var offset);
 
             var dataPage = SafeGetPage(page, index);
-            return dataPage?.GetAt(offset) ?? _getPlaceholder(_groupIndex, index, page, offset);
+            var ret = dataPage?.GetAt(offset);
+            if (ret != null)
+            {
+                return ret;
+            }
+
+            var placeholder = _getPlaceholder(_groupIndex, index, page, offset);
+            if (dataPage != null && placeholder != null)
+            {
+                if (offset < dataPage.ItemsCount)
+                {
+                    dataPage.ReplaceAt(offset, placeholder, null, null);
+                }
+                else
+                {
+                    dataPage.InsertAt(offset, placeholder, null, null);
+                }
+
+                dataPage.PageFetchState = PageFetchStateEnum.Placeholders;
+
+                lock (PageLock)
+                {
+                    if (!_tasks.ContainsKey(page))
+                    {
+                        var pageOffset = CalculatePageOffset(page);
+                        QueuePageFetch(dataPage, pageOffset, dataPage.ItemsPerPage);
+                    }
+                }
+            }
+
+            return placeholder;
         }
 
         /// <summary>
@@ -401,7 +431,137 @@ namespace ModelFlow.DataVirtualization.Pageing
             {
                 if (!_hasGotCount) return;
                 _itemCount = Math.Max(0, _itemCount + delta);
+                ResizeExistingPagesForCountLocked();
             }
+        }
+
+        private void ResizeExistingPagesForCountLocked()
+        {
+            if (_pages.Count == 0)
+            {
+                return;
+            }
+
+            var pagesToRemove = new List<int>();
+            foreach (var pageNumber in _pages.Keys.OrderBy(k => k).ToList())
+            {
+                var page = _pages[pageNumber];
+                var pageOffset = CalculatePageOffset(pageNumber);
+                var expectedSize = GetExpectedPageSizeLocked(pageNumber, pageOffset);
+
+                if (expectedSize <= 0)
+                {
+                    pagesToRemove.Add(pageNumber);
+                    continue;
+                }
+
+                if (page.ItemsPerPage < expectedSize)
+                {
+                    ExpandPageLocked(page, pageNumber, pageOffset, expectedSize);
+                    continue;
+                }
+
+                if (page.ItemsPerPage > expectedSize)
+                {
+                    ShrinkPageLocked(page, expectedSize);
+                }
+            }
+
+            foreach (var pageNumber in pagesToRemove)
+            {
+                CancelPageRequest(pageNumber);
+                if (_pages.TryGetValue(pageNumber, out var page))
+                {
+                    _pages.Remove(pageNumber);
+                    _reclaimer.OnPageReleased(page);
+                }
+            }
+        }
+
+        private int GetExpectedPageSizeLocked(int pageNumber, int pageOffset)
+        {
+            if (pageOffset >= _itemCount)
+            {
+                return 0;
+            }
+
+            var pageSize = Math.Min(PageSize, _itemCount - pageOffset);
+            if (_deltas.TryGetValue(pageNumber, out var delta))
+            {
+                pageSize += delta.Delta;
+            }
+
+            return Math.Max(0, pageSize);
+        }
+
+        private void ExpandPageLocked(ISourcePage<T> page, int pageNumber, int pageOffset, int expectedSize)
+        {
+            var previousCount = page.ItemsCount;
+            page.ItemsPerPage = expectedSize;
+
+            for (var i = previousCount; i < expectedSize; i++)
+            {
+                var placeholder = _getPlaceholder(_groupIndex, pageOffset + i, pageNumber, i);
+                page.Append(placeholder, null, ExpiryComparer);
+            }
+
+            page.PageFetchState = PageFetchStateEnum.Placeholders;
+            if (!_tasks.ContainsKey(pageNumber))
+            {
+                QueuePageFetch(page, pageOffset, expectedSize);
+            }
+        }
+
+        private void ShrinkPageLocked(ISourcePage<T> page, int expectedSize)
+        {
+            while (page.ItemsCount > expectedSize)
+            {
+                page.RemoveAt(page.ItemsCount - 1, null, ExpiryComparer);
+            }
+
+            page.ItemsPerPage = expectedSize;
+            if (page.PageFetchState != PageFetchStateEnum.Placeholders)
+            {
+                page.PageFetchState = PageFetchStateEnum.Fetched;
+            }
+        }
+
+        private bool EnsureInsertCapacity(ISourcePage<T> page, int pageNumber, int pageOffset, int offset)
+        {
+            if (offset < page.ItemsCount)
+            {
+                return false;
+            }
+
+            var requiredSize = offset + 1;
+            if (page.ItemsPerPage < PageSize)
+            {
+                requiredSize = Math.Min(PageSize, Math.Max(requiredSize, page.ItemsPerPage + 1));
+            }
+            else
+            {
+                requiredSize = Math.Min(PageSize, requiredSize);
+            }
+
+            if (page.ItemsPerPage < requiredSize)
+            {
+                page.ItemsPerPage = requiredSize;
+            }
+
+            var addedPlaceholders = false;
+            for (var i = page.ItemsCount; i < offset; i++)
+            {
+                var placeholder = _getPlaceholder(_groupIndex, pageOffset + i, pageNumber, i);
+                page.Append(placeholder, null, ExpiryComparer);
+                addedPlaceholders = true;
+            }
+
+            if (addedPlaceholders)
+            {
+                page.PageFetchState = PageFetchStateEnum.Placeholders;
+            }
+
+            return addedPlaceholders;
         }
 
         /// <summary>
@@ -417,7 +577,41 @@ namespace ModelFlow.DataVirtualization.Pageing
                     return false;
 
                 CalculateFromIndex(index, out var page, out _);
+                return _pages.TryGetValue(page, out var sourcePage) &&
+                       sourcePage.PageFetchState == PageFetchStateEnum.Fetched;
+            }
+        }
+
+        public bool HasIndexInMemory(int index)
+        {
+            lock (PageLock)
+            {
+                if (!_hasGotCount || index < 0 || index >= _itemCount)
+                    return false;
+
+                CalculateFromIndex(index, out var page, out _);
                 return _pages.ContainsKey(page);
+            }
+        }
+
+        public bool TryGetInMemoryAt(int index, out T item)
+        {
+            lock (PageLock)
+            {
+                item = default;
+
+                if (!_hasGotCount || index < 0 || index >= _itemCount)
+                    return false;
+
+                CalculateFromIndex(index, out var page, out var offset);
+                if (!_pages.TryGetValue(page, out var sourcePage))
+                    return false;
+
+                if (offset < 0 || offset >= sourcePage.ItemsCount)
+                    return false;
+
+                item = sourcePage.PeekAt(offset);
+                return true;
             }
         }
 
@@ -446,21 +640,27 @@ namespace ModelFlow.DataVirtualization.Pageing
 
                 if (_pages.TryGetValue(page, out var dataPage))
                 {
+                    var pageOffset = CalculatePageOffset(page);
+                    var addedPlaceholders = EnsureInsertCapacity(dataPage, page, pageOffset, offset);
                     dataPage.InsertAt(offset, item, DateTime.Now, ExpiryComparer);
 
                     // Track the delta adjustment
                     var adj = AddOrUpdateAdjustment(page, 1);
 
-                    // Handle short page growth
-                    if (dataPage.ItemsPerPage < PageSize)
+                    if (dataPage.ItemsPerPage < dataPage.ItemsCount)
                     {
-                        dataPage.ItemsPerPage++;
+                        dataPage.ItemsPerPage = dataPage.ItemsCount;
                     }
 
                     // Handle page overflow - create new base page if needed
                     if (page == _basePage && adj == PageSize * 2)
                     {
                         HandlePageOverflow(page, dataPage, index);
+                    }
+
+                    if (addedPlaceholders && !_tasks.ContainsKey(page))
+                    {
+                        QueuePageFetch(dataPage, pageOffset, dataPage.ItemsPerPage);
                     }
 
                     _itemCount++;
@@ -617,6 +817,14 @@ namespace ModelFlow.DataVirtualization.Pageing
                 if (_pages.TryGetValue(pageNum, out var existingPage))
                 {
                     _reclaimer.OnPageTouched(existingPage);
+
+                    if (existingPage.PageFetchState == PageFetchStateEnum.Placeholders &&
+                        !_tasks.ContainsKey(pageNum))
+                    {
+                        var existingPageOffset = CalculatePageOffset(pageNum);
+                        QueuePageFetch(existingPage, existingPageOffset, existingPage.ItemsPerPage);
+                    }
+
                     return existingPage;
                 }
 
@@ -641,12 +849,33 @@ namespace ModelFlow.DataVirtualization.Pageing
                     newPage.Append(placeholder, null, ExpiryComparer);
                 }
 
-                var cts = StartPageRequest(pageNum);
-                Task.Run(async () => await FetchPageAsync(newPage, pageOffset, pageSize, null, cts, cts.Token), cts.Token)
-                    .ConfigureAwait(false);
+                QueuePageFetch(newPage, pageOffset, pageSize);
 
                 return newPage;
             }
+        }
+
+        private void QueuePageFetch(ISourcePage<T> page, int offset, int requestedCount)
+        {
+            var cts = StartPageRequest(page.Page);
+            Task.Run(async () => await FetchPageAsync(page, offset, requestedCount, null, cts, cts.Token), cts.Token)
+                .ConfigureAwait(false);
+        }
+
+        private static bool PageHasLoadingItems(ISourcePage<T> page)
+        {
+            // Completion should be based on the current requested page shape, not any stale
+            // wrappers that may still exist beyond ItemsPerPage after prior inserts/removes.
+            for (var i = 0; i < page.ItemsPerPage; i++)
+            {
+                var item = page.PeekAt(i);
+                if (item == null || item.IsLoading)
+                {
+                    return true;
+                }
+            }
+
+            return false;
         }
 
         private int CalculatePageOffset(int pageNum)
@@ -667,21 +896,45 @@ namespace ModelFlow.DataVirtualization.Pageing
         {
             if (cts.IsCancellationRequested) return;
 
+            var replacementQueued = false;
+
             try
             {
                 await _fetchItems(page, _groupIndex, offset, count, signal, cancellationToken);
 
                 if (cts.IsCancellationRequested) return;
 
-                // Record when the page was loaded (used for expiry comparison)
-                page.WiredDateTime = DateTime.Now;
+                var needsRefetch = false;
+                var currentOffset = offset;
+                var currentRequestedCount = count;
 
-                // Mark page as fetched - the provider already materialized items via SetItem()
-                await VirtualizationManager.Instance.RunOnUiAsync(new ActionVirtualizationWrapper(() =>
+                lock (PageLock)
                 {
-                    if (cts.IsCancellationRequested) return;
-                    page.PageFetchState = PageFetchStateEnum.Fetched;
-                }));
+                    if (!_pages.TryGetValue(page.Page, out var currentPage) || !ReferenceEquals(currentPage, page))
+                    {
+                        RemovePageRequest(page.Page);
+                        return;
+                    }
+
+                    currentOffset = CalculatePageOffset(page.Page);
+                    currentRequestedCount = page.ItemsPerPage;
+                    needsRefetch = currentOffset != offset
+                        || currentRequestedCount != count
+                        || PageHasLoadingItems(page);
+
+                    page.WiredDateTime = DateTime.Now;
+                    page.PageFetchState = needsRefetch
+                        ? PageFetchStateEnum.Placeholders
+                        : PageFetchStateEnum.Fetched;
+                }
+
+                if (needsRefetch && !cts.IsCancellationRequested)
+                {
+                    RemovePageRequest(page.Page);
+                    QueuePageFetch(page, currentOffset, currentRequestedCount);
+                    replacementQueued = true;
+                    return;
+                }
             }
             catch (OperationCanceledException)
             {
@@ -689,7 +942,10 @@ namespace ModelFlow.DataVirtualization.Pageing
             }
             finally
             {
-                RemovePageRequest(page.Page);
+                if (!replacementQueued)
+                {
+                    RemovePageRequest(page.Page);
+                }
             }
         }
 

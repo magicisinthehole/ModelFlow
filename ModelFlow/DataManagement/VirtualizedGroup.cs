@@ -3,6 +3,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
     using System;
     using System.Collections;
     using System.Collections.Generic;
+    using System.ComponentModel;
     using System.Threading;
     using System.Threading.Tasks;
     using Interfaces;
@@ -13,7 +14,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
     /// Each group manages its items independently for true per-group virtualization.
     /// </summary>
     /// <typeparam name="T">The type of items in the group.</typeparam>
-    public class VirtualizedGroup<T> : IVirtualizedGroup<T> where T : class
+    public class VirtualizedGroup<T> : IVirtualizedGroup<T>, INotifyPropertyChanged where T : class
     {
         private readonly GroupPaginationManager<DataItem<T>> _paginationManager;
         private readonly VirtualizedGroupItemsList _itemsList;
@@ -79,13 +80,35 @@ namespace ModelFlow.DataVirtualization.DataManagement
         /// <inheritdoc />
         public bool IsFullyLoaded => _paginationManager.IsFullyLoaded;
 
+        /// <inheritdoc />
+        public event PropertyChangedEventHandler? PropertyChanged;
+
         /// <summary>
         /// Updates the group info (e.g., after structure refresh).
         /// </summary>
         internal void UpdateGroupInfo(GroupInfo newInfo)
         {
+            var previousKey = _groupInfo.Key;
+            var previousHeaderData = _groupInfo.HeaderData;
+            var previousItemCount = _paginationManager.Count;
+
             _groupInfo = newInfo;
             _paginationManager.SetItemCount(newInfo.ItemCount);
+
+            if (!string.Equals(previousKey, newInfo.Key, StringComparison.Ordinal))
+            {
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Key)));
+            }
+
+            if (!Equals(previousHeaderData, newInfo.HeaderData))
+            {
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(HeaderData)));
+            }
+
+            if (previousItemCount != newInfo.ItemCount)
+            {
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ItemCount)));
+            }
         }
 
         /// <summary>
@@ -95,6 +118,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
         {
             GroupIndex = newIndex;
             _paginationManager.UpdateGroupIndex(newIndex);
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(GroupIndex)));
         }
 
         /// <summary>
@@ -139,6 +163,17 @@ namespace ModelFlow.DataVirtualization.DataManagement
         public bool IsIndexLoaded(int index)
         {
             return _paginationManager.IsIndexLoaded(index);
+        }
+
+        /// <inheritdoc />
+        public bool HasIndexInMemory(int index)
+        {
+            return _paginationManager.HasIndexInMemory(index);
+        }
+
+        public bool TryGetInMemoryItem(int index, out DataItem<T> item)
+        {
+            return _paginationManager.TryGetInMemoryAt(index, out item);
         }
 
         /// <inheritdoc />

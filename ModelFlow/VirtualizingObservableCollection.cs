@@ -897,7 +897,11 @@
 
         private T InternalSetValue(int index, T newValue)
         {
-            var oldValue = InternalGetValue(index, DefaultSelectionContext);
+            if (!TryGetInMemoryValue(index, out var oldValue))
+            {
+                oldValue = InternalGetValue(index, DefaultSelectionContext);
+            }
+
             var edit = GetProviderAsEditable();
             edit.OnReplace(index, oldValue, newValue, null);
 
@@ -980,7 +984,10 @@
         {
             if (!(Provider is IEditableProviderIndexBased<T> edit)) return false;
 
-            T obj = this[oldIndex];
+            if (!TryGetInMemoryValue(oldIndex, out var obj))
+            {
+                obj = this[oldIndex];
+            }
             
             edit.OnRemove(oldIndex, timestamp);
             edit.OnInsert(newIndex, obj, timestamp);
@@ -1069,6 +1076,29 @@
         {
             return GetPaginationManager()?.IsIndexLoaded(index) ?? false;
         }
+
+        /// <summary>
+        /// Checks if an index is backed by a page currently present in memory,
+        /// including placeholder pages that are still being fetched.
+        /// </summary>
+        internal bool HasIndexInMemory(int index)
+        {
+            return GetPaginationManager()?.HasIndexInMemory(index) ?? false;
+        }
+
+        internal bool TryGetInMemoryValue(int index, out T item)
+        {
+            var paginationManager = GetPaginationManager();
+            if (paginationManager == null)
+            {
+                item = default;
+                return false;
+            }
+
+            return paginationManager.TryGetInMemoryAt(index, out item);
+        }
+
+        internal int PageSize => GetPaginationManager()?.PageSize ?? 0;
 
         /// <summary>
         /// Gets whether the count has been fetched.

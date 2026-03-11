@@ -61,6 +61,12 @@ namespace ModelFlow.DataVirtualization.Interfaces
         /// Checks if the specified index falls within a loaded page.
         /// </summary>
         bool IsIndexLoaded(int index);
+
+        /// <summary>
+        /// Checks if the specified index falls within a page that currently exists in memory,
+        /// including placeholder pages that are still being fetched.
+        /// </summary>
+        bool HasIndexInMemory(int index);
     }
 
     /// <summary>
@@ -81,5 +87,11 @@ namespace ModelFlow.DataVirtualization.Interfaces
         /// Gets the loaded page numbers for debugging/diagnostics.
         /// </summary>
         IReadOnlyList<int> GetLoadedPageNumbers();
+
+        /// <summary>
+        /// Gets an already-materialized item from the specified index without triggering pagination.
+        /// Returns false if the slot is not currently backed by an in-memory page entry.
+        /// </summary>
+        bool TryGetInMemoryItem(int index, out DataItem<T> item);
     }
 }

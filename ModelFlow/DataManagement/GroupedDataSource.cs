@@ -449,7 +449,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
                     if (groupIndex >= 0 && itemIndex >= 0)
                     {
                         var group = GetGroupByIndex(groupIndex);
-                        if (group != null && group.IsIndexLoaded(itemIndex))
+                        if (group != null && group.HasIndexInMemory(itemIndex))
                         {
                             _collection.InsertItemAt(groupIndex, itemIndex, item);
                         }
@@ -537,7 +537,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
                 {
                     // Remove from collection if in a loaded page
                     var group = GetGroupByIndex(groupIndex);
-                    if (group != null && group.IsIndexLoaded(itemIndex))
+                    if (group != null && group.HasIndexInMemory(itemIndex))
                     {
                         _collection.RemoveItemAt(groupIndex, itemIndex);
                     }
@@ -581,9 +581,15 @@ namespace ModelFlow.DataVirtualization.DataManagement
             // Default implementation - search loaded pages only
             foreach (var group in _collection)
             {
-                foreach (var dataItem in group.Items)
+                for (var i = 0; i < group.ItemCount; i++)
                 {
-                    if (!dataItem.IsLoading && EqualityComparer<TViewModel>.Default.Equals(dataItem.Item, item))
+                    if (!group.HasIndexInMemory(i) || !group.TryGetInMemoryItem(i, out var dataItem))
+                        continue;
+
+                    if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                        continue;
+
+                    if (EqualityComparer<TViewModel>.Default.Equals(dataItem.Item, item))
                     {
                         return Task.FromResult(true);
                     }
@@ -604,10 +610,15 @@ namespace ModelFlow.DataVirtualization.DataManagement
             for (var g = 0; g < _collection.Count; g++)
             {
                 var group = _collection[g];
-                for (var i = 0; i < group.Items.Count; i++)
+                for (var i = 0; i < group.ItemCount; i++)
                 {
-                    var dataItem = group.Items[i];
-                    if (!dataItem.IsLoading && EqualityComparer<TViewModel>.Default.Equals(dataItem.Item, item))
+                    if (!group.HasIndexInMemory(i) || !group.TryGetInMemoryItem(i, out var dataItem))
+                        continue;
+
+                    if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                        continue;
+
+                    if (EqualityComparer<TViewModel>.Default.Equals(dataItem.Item, item))
                     {
                         return Task.FromResult((g, i));
                     }
@@ -716,13 +727,133 @@ namespace ModelFlow.DataVirtualization.DataManagement
         {
             foreach (var group in _collection)
             {
-                foreach (var dataItem in group.Items)
+                for (var i = 0; i < group.ItemCount; i++)
                 {
-                    if (!dataItem.IsLoading)
-                    {
-                        yield return dataItem.Item;
-                    }
+                    if (!group.HasIndexInMemory(i) || !group.TryGetInMemoryItem(i, out var dataItem))
+                        continue;
+
+                    if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                        continue;
+
+                    yield return dataItem.Item;
                 }
+            }
+        }
+
+        /// <summary>
+    /// Gets the contiguous fully loaded ranges for a specific group.
+    /// Placeholder-backed pages are excluded so reload/repair logic does not keep
+    /// refetching partially materialized windows during active updates.
+    /// </summary>
+    public IReadOnlyList<(int StartIndex, int Count)> GetLoadedRangesInGroup(string groupKey)
+    {
+        var group = GetGroupByKey(groupKey);
+        if (group == null || !group.HasGotCount)
+            {
+                return Array.Empty<(int StartIndex, int Count)>();
+            }
+
+            var ranges = new List<(int StartIndex, int Count)>();
+            var rangeStart = -1;
+
+            for (int i = 0; i < group.ItemCount; i++)
+            {
+            var isLoaded = group.IsIndexLoaded(i);
+            if (isLoaded)
+            {
+                if (rangeStart < 0)
+                {
+                    rangeStart = i;
+                }
+
+                    continue;
+                }
+
+                if (rangeStart >= 0)
+                {
+                    ranges.Add((rangeStart, i - rangeStart));
+                    rangeStart = -1;
+                }
+            }
+
+            if (rangeStart >= 0)
+            {
+                ranges.Add((rangeStart, group.ItemCount - rangeStart));
+            }
+
+            return ranges;
+        }
+
+        /// <summary>
+        /// Rehydrates the currently materialized ranges for a single group in place.
+        /// This preserves the surrounding grouped view while repairing boundary-crossing updates.
+        /// </summary>
+        public async Task ReloadLoadedRangesInGroupAsync(string groupKey, CancellationToken cancellationToken = default)
+        {
+            var ranges = GetLoadedRangesInGroup(groupKey);
+            if (ranges.Count == 0)
+            {
+                return;
+            }
+
+            var group = GetGroupByKey(groupKey);
+            if (group == null)
+            {
+                return;
+            }
+
+            StartOperation();
+            try
+            {
+                var filter = _filterQuery;
+
+                foreach (var range in ranges)
+                {
+                    var models = (await GetGroupItemsAsync(
+                            groupKey,
+                            range.StartIndex,
+                            range.Count,
+                            x => BuildFilterSortQuery(x, filter),
+                            cancellationToken))
+                        .ToList();
+
+                    cancellationToken.ThrowIfCancellationRequested();
+
+                    if (models.Count != range.Count)
+                    {
+                        throw new InvalidOperationException(
+                            $"ReloadLoadedRangesInGroupAsync expected {range.Count} items at offset {range.StartIndex} " +
+                            $"for group '{groupKey}' but received {models.Count} in {GetType().Name}.");
+                    }
+
+                    var completionSource = new TaskCompletionSource<bool>();
+                    await VirtualizationManager.Instance.RunOnUiAsync(new ActionVirtualizationWrapper(async () =>
+                    {
+                        for (int i = 0; i < models.Count; i++)
+                        {
+                            var index = range.StartIndex + i;
+                            if (!group.HasIndexInMemory(index))
+                            {
+                                continue;
+                            }
+
+                            if (!group.TryGetInMemoryItem(index, out var wrapper) || wrapper == null)
+                            {
+                                continue;
+                            }
+
+                            await Materialize(wrapper, models[i]);
+                        }
+
+                        completionSource.TrySetResult(true);
+                    }));
+
+                    await completionSource.Task;
+                }
+            }
+            finally
+            {
+                EndOperation();
             }
         }
 
@@ -759,9 +890,15 @@ namespace ModelFlow.DataVirtualization.DataManagement
         {
             foreach (var group in _collection)
             {
-                foreach (var dataItem in group.Items)
+                for (var i = 0; i < group.ItemCount; i++)
                 {
-                    if (!dataItem.IsLoading && dataItem.Item != null && predicate(dataItem.Item))
+                    if (!group.HasIndexInMemory(i) || !group.TryGetInMemoryItem(i, out var dataItem))
+                        continue;
+
+                    if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                        continue;
+
+                    if (predicate(dataItem.Item))
                     {
                         dataItem.UpdateItem(updatedItem);
                         return true;
@@ -783,9 +920,15 @@ namespace ModelFlow.DataVirtualization.DataManagement
         {
             foreach (var group in _collection)
             {
-                foreach (var dataItem in group.Items)
+                for (var i = 0; i < group.ItemCount; i++)
                 {
-                    if (!dataItem.IsLoading && dataItem.Item != null && predicate(dataItem.Item))
+                    if (!group.HasIndexInMemory(i) || !group.TryGetInMemoryItem(i, out var dataItem))
+                        continue;
+
+                    if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                        continue;
+
+                    if (predicate(dataItem.Item))
                     {
                         action(dataItem.Item);
                         return true;
@@ -827,6 +970,31 @@ namespace ModelFlow.DataVirtualization.DataManagement
         }
 
         /// <summary>
+        /// Removes a group by key without invalidating the data source.
+        /// </summary>
+        /// <param name="groupKey">The group key to remove.</param>
+        /// <returns>True if the group was removed; otherwise, false.</returns>
+        public bool RemoveGroup(string groupKey)
+        {
+            var group = GetGroupByKey(groupKey);
+            return group != null && _collection.RemoveGroupAt(group.GroupIndex);
+        }
+
+        /// <summary>
+        /// Inserts a new group or updates an existing group's header metadata and position.
+        /// </summary>
+        /// <param name="groupKey">The group key.</param>
+        /// <param name="itemCount">The current item count for the group.</param>
+        /// <param name="headerData">Optional header data for rendering and ordering.</param>
+        /// <returns>The inserted or updated group, or null if the operation failed.</returns>
+        public IVirtualizedGroup<TViewModel>? UpsertGroup(string groupKey, int itemCount = 0, object? headerData = null)
+        {
+            var info = new GroupInfo(groupKey, itemCount, headerData);
+            var insertionIndex = GetGroupInsertionIndex(groupKey, headerData, groupKey);
+            return _collection.UpsertGroupAt(groupKey, insertionIndex, info);
+        }
+
+        /// <summary>
         /// Gets the sorted insertion index for a new group.
         /// Uses binary search with customizable comparison semantics.
         /// </summary>
@@ -835,11 +1003,52 @@ namespace ModelFlow.DataVirtualization.DataManagement
         /// <returns>The index where the group should be inserted.</returns>
         public int GetGroupInsertionIndex(string groupKey, object? headerData = null)
         {
+            return GetGroupInsertionIndex(groupKey, headerData, null);
+        }
+
+        private int GetGroupInsertionIndex(string groupKey, object? headerData, string? excludedGroupKey)
+        {
             var structure = _collection.GetLayoutStructure();
             if (structure == null || structure.Count == 0)
                 return 0;
 
             // Binary search for the correct position
+            int left = 0;
+            int right = structure.Count - 1;
+
+            while (left <= right)
+            {
+                int mid = (left + right) / 2;
+                if (excludedGroupKey != null &&
+                    string.Equals(structure[mid].Key, excludedGroupKey, StringComparison.Ordinal))
+                {
+                    var reduced = structure
+                        .Where(group => !string.Equals(group.Key, excludedGroupKey, StringComparison.Ordinal))
+                        .ToList();
+
+                    return GetInsertionIndexFromStructure(reduced, groupKey, headerData);
+                }
+
+                int cmp = CompareGroupForInsertion(structure[mid], groupKey, headerData);
+
+                if (cmp < 0)
+                    left = mid + 1;
+                else if (cmp > 0)
+                    right = mid - 1;
+                else
+                    return mid; // Exact match (shouldn't happen for new group)
+            }
+
+            return left;
+        }
+
+        private int GetInsertionIndexFromStructure(IReadOnlyList<GroupInfo> structure, string groupKey, object? headerData)
+        {
+            if (structure.Count == 0)
+            {
+                return 0;
+            }
+
             int left = 0;
             int right = structure.Count - 1;
 
@@ -853,7 +1062,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
                 else if (cmp > 0)
                     right = mid - 1;
                 else
-                    return mid; // Exact match (shouldn't happen for new group)
+                    return mid;
             }
 
             return left;
@@ -907,10 +1116,15 @@ namespace ModelFlow.DataVirtualization.DataManagement
             for (int g = 0; g < _collection.Count; g++)
             {
                 var group = _collection[g];
-                for (int i = 0; i < group.Items.Count; i++)
+                for (int i = 0; i < group.ItemCount; i++)
                 {
-                    var dataItem = group.Items[i];
-                    if (!dataItem.IsLoading && predicate(dataItem.Item))
+                    if (!group.HasIndexInMemory(i) || !group.TryGetInMemoryItem(i, out var dataItem))
+                        continue;
+
+                    if (dataItem == null || dataItem.IsLoading || dataItem.Item == null)
+                        continue;
+
+                    if (predicate(dataItem.Item))
                     {
                         return _collection.RemoveItemAt(g, i);
                     }
@@ -943,6 +1157,16 @@ namespace ModelFlow.DataVirtualization.DataManagement
         {
             var group = GetGroupByKey(groupKey);
             return group?.IsIndexLoaded(index) ?? false;
+        }
+
+        /// <summary>
+        /// Checks if a specific index within a group is backed by a page currently present in memory,
+        /// including placeholder pages that are still being fetched.
+        /// </summary>
+        public bool IsGroupIndexInMemory(string groupKey, int index)
+        {
+            var group = GetGroupByKey(groupKey);
+            return group?.HasIndexInMemory(index) ?? false;
         }
 
         #endregion
@@ -1062,6 +1286,30 @@ namespace ModelFlow.DataVirtualization.DataManagement
         private async Task<DataItem<TViewModel>> Materialize(ISourcePage<DataItem<TViewModel>> page, int pageIndex, TModel model)
         {
             var placeholder = page.GetAt(pageIndex);
+            if (placeholder == null)
+            {
+                var viewModel = _selector(model);
+                await InitializeItemAsync(viewModel);
+
+                placeholder = DataItem.Create(viewModel);
+                if (pageIndex < page.ItemsCount)
+                {
+                    page.ReplaceAt(pageIndex, placeholder, null, null);
+                }
+                else
+                {
+                    page.InsertAt(pageIndex, placeholder, null, null);
+                }
+
+                OnMaterializedInternal(placeholder);
+                return placeholder;
+            }
+
+            return await Materialize(placeholder, model);
+        }
+
+        private async Task<DataItem<TViewModel>> Materialize(DataItem<TViewModel> placeholder, TModel model)
+        {
             var viewModel = _selector(model);
             await InitializeItemAsync(viewModel);
             placeholder.SetItem(viewModel);

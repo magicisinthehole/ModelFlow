@@ -465,8 +465,39 @@
 
             if (ret == null)
             {
+                if (datapage != null && IsAsync && ProviderAsync != null)
+                {
+                    var placeholder = ProviderAsync.GetPlaceHolder(index, page, offset);
+                    if (placeholder != null)
+                    {
+                        if (offset < datapage.ItemsCount)
+                        {
+                            datapage.ReplaceAt(offset, placeholder, null, null);
+                        }
+                        else
+                        {
+                            datapage.InsertAt(offset, placeholder, null, null);
+                        }
+
+                        datapage.PageFetchState = PageFetchStateEnum.Placeholders;
+                        ret = placeholder;
+
+                        if (voc != null)
+                        {
+                            lock (PageLock)
+                            {
+                                if (!_tasks.ContainsKey(page))
+                                {
+                                    var pageOffset = CalculatePageOffset(page);
+                                    QueuePageFetch(datapage, voc, page, pageOffset, datapage.ItemsPerPage);
+                                }
+                            }
+                        }
+                    }
+                }
+
                 // Inconsistency detected - notify reset collection
-                if (nullTryCount <= 0)
+                if (ret == null && nullTryCount <= 0)
                 {
                     OnProviderCollectionChanged(Provider,
                         new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Reset));
@@ -519,24 +550,40 @@
         {
             lock (PageLock)
             {
-                if (_pages.ContainsKey(page) || _tasks.ContainsKey(page))
+                if (_tasks.ContainsKey(page))
                     return;
+
+                if (_pages.TryGetValue(page, out var existingPage))
+                {
+                    if (voc != null && existingPage.PageFetchState == PageFetchStateEnum.Placeholders)
+                    {
+                        var existingPageOffset = CalculatePageOffset(page);
+                        QueuePageFetch(existingPage, voc, page, existingPageOffset, existingPage.ItemsPerPage);
+                    }
+
+                    return;
+                }
 
                 var newPage = CreateNewPage(page, out var pageSize, out var pageOffset);
                 if (pageSize <= 0) return;
 
                 for (var i = 0; i < pageSize; i++)
                 {
-                    var placeHolder = ProviderAsync.GetPlaceHolder(newPage.Page * pageSize + i, newPage.Page, i);
+                    var placeHolder = ProviderAsync.GetPlaceHolder(pageOffset + i, newPage.Page, i);
                     newPage.Append(placeHolder, null, ExpiryComparer);
                 }
 
-                var cts = StartPageRequest(page);
-                Task.Run(async () =>
-                {
-                    await DoRealPageGet(voc, newPage, pageOffset, pageOffset, cts);
-                }, cts.Token).ConfigureAwait(false);
+                QueuePageFetch(newPage, voc, page, pageOffset, pageSize);
             }
+        }
+
+        private void QueuePageFetch(ISourcePage<T> page, object voc, int pageNumber, int pageOffset, int requestedCount)
+        {
+            var cts = StartPageRequest(pageNumber);
+            Task.Run(async () =>
+            {
+                await DoRealPageGet(voc, page, pageOffset, requestedCount, cts);
+            }, cts.Token).ConfigureAwait(false);
         }
 
 
@@ -1071,6 +1118,16 @@
                 {
                     ret = _pages[page];
                     _reclaimer.OnPageTouched(ret);
+
+                    if (IsAsync && voc != null && ret.PageFetchState == PageFetchStateEnum.Placeholders &&
+                        !_tasks.ContainsKey(page))
+                    {
+                        var pageOffset = (page - _basePage) * PageSize + (from d in _deltas.Values
+                                         where d.Page < page
+                                         select d.Delta).Sum();
+
+                        QueuePageFetch(ret, voc, page, pageOffset, ret.ItemsPerPage);
+                    }
                 }
                 else
                 {
@@ -1090,19 +1147,12 @@
                         {
                             for (var loop = 0; loop < pageSize; loop++)
                             {
-                                var placeHolder = ProviderAsync.GetPlaceHolder(newPage.Page * pageSize + loop,
-                                    newPage.Page, loop);
+                                var placeHolder = ProviderAsync.GetPlaceHolder(pageOffset + loop, newPage.Page, loop);
                                 newPage.Append(placeHolder, null, ExpiryComparer);
                             }
 
                             ret = newPage;
-
-                            var cts = StartPageRequest(newPage.Page);
-                            Task.Run(async () =>
-                                {
-                                    await DoRealPageGet(voc, newPage, pageOffset, index, cts);
-                                }, cts.Token)
-                                .ConfigureAwait(false);
+                            QueuePageFetch(newPage, voc, newPage.Page, pageOffset, newPage.ItemsPerPage);
                         }
                         else
                         {
@@ -1137,7 +1187,68 @@
             return newPage;
         }
 
-        private async Task DoRealPageGet(object voc, ISourcePage<T> page, int pageOffset, int index,
+        private int CalculatePageOffset(int page)
+        {
+            return (page - _basePage) * PageSize + (from d in _deltas.Values
+                where d.Page < page
+                select d.Delta).Sum();
+        }
+
+        private bool EnsureInsertCapacity(ISourcePage<T> page, int pageNumber, int pageOffset, int offset)
+        {
+            if (!IsAsync || ProviderAsync == null || offset < page.ItemsCount)
+            {
+                return false;
+            }
+
+            var requiredSize = offset + 1;
+            if (page.ItemsPerPage < PageSize)
+            {
+                requiredSize = Math.Min(PageSize, Math.Max(requiredSize, page.ItemsPerPage + 1));
+            }
+            else
+            {
+                requiredSize = Math.Min(PageSize, requiredSize);
+            }
+
+            if (page.ItemsPerPage < requiredSize)
+            {
+                page.ItemsPerPage = requiredSize;
+            }
+
+            var addedPlaceholders = false;
+            for (var i = page.ItemsCount; i < offset; i++)
+            {
+                var placeholder = ProviderAsync.GetPlaceHolder(pageOffset + i, pageNumber, i);
+                page.Append(placeholder, null, ExpiryComparer);
+                addedPlaceholders = true;
+            }
+
+            if (addedPlaceholders)
+            {
+                page.PageFetchState = PageFetchStateEnum.Placeholders;
+            }
+
+            return addedPlaceholders;
+        }
+
+        private static bool PageHasLoadingItems(ISourcePage<T> page)
+        {
+            // Completion should be based on the current requested page shape, not any stale
+            // wrappers that may still exist beyond ItemsPerPage after prior inserts/removes.
+            for (var i = 0; i < page.ItemsPerPage; i++)
+            {
+                var item = page.PeekAt(i);
+                if (item == null || item.IsLoading)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private async Task DoRealPageGet(object voc, ISourcePage<T> page, int pageOffset, int requestedCount,
             CancellationTokenSource cts)
         {
             if (cts.IsCancellationRequested)
@@ -1147,16 +1258,42 @@
 
             try
             {
-                var data = new PagedSourceItemsPacket<T>(await ProviderAsync.GetItemsAtAsync(page, pageOffset, page.ItemsPerPage, null, cts.Token));
+                var data = new PagedSourceItemsPacket<T>(await ProviderAsync.GetItemsAtAsync(page, pageOffset, requestedCount, null, cts.Token));
 
                 if (cts.IsCancellationRequested)
                 {
                     return;
                 }
 
-                page.WiredDateTime = data.LoadedAt;
-                page.PageFetchState = PageFetchStateEnum.Fetched;
-                RemovePageRequest(page.Page);
+                var needsRefetch = false;
+                var currentPageOffset = pageOffset;
+                var currentRequestedCount = requestedCount;
+
+                lock (PageLock)
+                {
+                    if (!_pages.TryGetValue(page.Page, out var currentPage) || !ReferenceEquals(currentPage, page))
+                    {
+                        RemovePageRequest(page.Page);
+                        return;
+                    }
+
+                    currentPageOffset = CalculatePageOffset(page.Page);
+                    currentRequestedCount = page.ItemsPerPage;
+                    needsRefetch = currentPageOffset != pageOffset
+                        || currentRequestedCount != requestedCount
+                        || PageHasLoadingItems(page);
+
+                    page.WiredDateTime = data.LoadedAt;
+                    page.PageFetchState = needsRefetch
+                        ? PageFetchStateEnum.Placeholders
+                        : PageFetchStateEnum.Fetched;
+                    RemovePageRequest(page.Page);
+                }
+
+                if (needsRefetch && !cts.IsCancellationRequested)
+                {
+                    QueuePageFetch(page, voc, page.Page, currentPageOffset, currentRequestedCount);
+                }
             }
             catch (OperationCanceledException)
             {
@@ -1190,22 +1327,19 @@
 
             CalculateFromIndex(index, out var page, out var offset);
 
-            var dataPage = SafeGetPage(page, _getVoc(), index);
+            var voc = _getVoc();
+            var dataPage = SafeGetPage(page, voc, index);
+            var pageOffset = CalculatePageOffset(page);
+
+            var addedPlaceholders = EnsureInsertCapacity(dataPage, page, pageOffset, offset);
 
             dataPage.InsertAt(offset, item, timestamp, ExpiryComparer);
 
             var adj = AddOrUpdateAdjustment(page, 1);
 
-            bool pageShort = false;
-
-            if (dataPage.ItemsPerPage < PageSize)
+            if (dataPage.ItemsPerPage < dataPage.ItemsCount)
             {
-                pageShort = true;
-            }
-
-            if (pageShort)
-            {
-                dataPage.ItemsPerPage++;
+                dataPage.ItemsPerPage = dataPage.ItemsCount;
             }
 
             if (page == _basePage && adj == PageSize * 2)
@@ -1237,6 +1371,17 @@
                     AddOrUpdateAdjustment(page, -PageSize);
 
                     _basePage--;
+                }
+            }
+
+            if (addedPlaceholders && IsAsync && voc != null)
+            {
+                lock (PageLock)
+                {
+                    if (!_tasks.ContainsKey(page))
+                    {
+                        QueuePageFetch(dataPage, voc, page, pageOffset, dataPage.ItemsPerPage);
+                    }
                 }
             }
 
@@ -1529,8 +1674,111 @@
                 newCount = Interlocked.Add(ref _localCount, delta);
             }
 
+            ResizeExistingPagesForCount(newCount);
+
             // Notify outside lock to prevent deadlocks
             RaiseCountChanged(needsReset: false, newCount);
+        }
+
+        private void ResizeExistingPagesForCount(int newCount)
+        {
+            if (!IsAsync || ProviderAsync == null)
+            {
+                return;
+            }
+
+            var voc = _getVoc?.Invoke();
+
+            lock (PageLock)
+            {
+                if (_pages.Count == 0)
+                {
+                    return;
+                }
+
+                var pagesToRemove = new List<int>();
+                foreach (var pageNumber in _pages.Keys.OrderBy(k => k).ToList())
+                {
+                    var page = _pages[pageNumber];
+                    var pageOffset = CalculatePageOffset(pageNumber);
+                    var expectedSize = GetExpectedPageSize(pageNumber, newCount, pageOffset);
+
+                    if (expectedSize <= 0)
+                    {
+                        pagesToRemove.Add(pageNumber);
+                        continue;
+                    }
+
+                    if (page.ItemsPerPage < expectedSize)
+                    {
+                        ExpandPage(page, pageNumber, pageOffset, expectedSize, voc);
+                        continue;
+                    }
+
+                    if (page.ItemsPerPage > expectedSize)
+                    {
+                        ShrinkPage(page, expectedSize);
+                    }
+                }
+
+                foreach (var pageNumber in pagesToRemove)
+                {
+                    CancelPageRequest(pageNumber);
+                    if (_pages.TryGetValue(pageNumber, out var page))
+                    {
+                        _pages.Remove(pageNumber);
+                        _reclaimer.OnPageReleased(page);
+                    }
+                }
+            }
+        }
+
+        private int GetExpectedPageSize(int pageNumber, int totalCount, int pageOffset)
+        {
+            if (pageOffset >= totalCount)
+            {
+                return 0;
+            }
+
+            var pageSize = Math.Min(PageSize, totalCount - pageOffset);
+            if (_deltas.TryGetValue(pageNumber, out var delta))
+            {
+                pageSize += delta.Delta;
+            }
+
+            return Math.Max(0, pageSize);
+        }
+
+        private void ExpandPage(ISourcePage<T> page, int pageNumber, int pageOffset, int expectedSize, object? voc)
+        {
+            var previousCount = page.ItemsCount;
+            page.ItemsPerPage = expectedSize;
+
+            for (var i = previousCount; i < expectedSize; i++)
+            {
+                var placeholder = ProviderAsync.GetPlaceHolder(pageOffset + i, pageNumber, i);
+                page.Append(placeholder, null, ExpiryComparer);
+            }
+
+            page.PageFetchState = PageFetchStateEnum.Placeholders;
+            if (voc != null && !_tasks.ContainsKey(pageNumber))
+            {
+                QueuePageFetch(page, voc, pageNumber, pageOffset, expectedSize);
+            }
+        }
+
+        private void ShrinkPage(ISourcePage<T> page, int expectedSize)
+        {
+            while (page.ItemsCount > expectedSize)
+            {
+                page.RemoveAt(page.ItemsCount - 1, null, ExpiryComparer);
+            }
+
+            page.ItemsPerPage = expectedSize;
+            if (page.PageFetchState != PageFetchStateEnum.Placeholders)
+            {
+                page.PageFetchState = PageFetchStateEnum.Fetched;
+            }
         }
 
         /// <summary>
@@ -1548,7 +1796,49 @@
                 }
 
                 CalculateFromIndex(index, out var page, out _);
+                return _pages.TryGetValue(page, out var sourcePage) &&
+                       sourcePage.PageFetchState == PageFetchStateEnum.Fetched;
+            }
+        }
+
+        public bool HasIndexInMemory(int index)
+        {
+            lock (PageLock)
+            {
+                if (!_hasGotCount || index < 0 || index >= _localCount)
+                {
+                    return false;
+                }
+
+                CalculateFromIndex(index, out var page, out _);
                 return _pages.ContainsKey(page);
+            }
+        }
+
+        public bool TryGetInMemoryAt(int index, out T item)
+        {
+            lock (PageLock)
+            {
+                item = default;
+
+                if (!_hasGotCount || index < 0 || index >= _localCount)
+                {
+                    return false;
+                }
+
+                CalculateFromIndex(index, out var page, out var offset);
+                if (!_pages.TryGetValue(page, out var sourcePage))
+                {
+                    return false;
+                }
+
+                if (offset < 0 || offset >= sourcePage.ItemsCount)
+                {
+                    return false;
+                }
+
+                item = sourcePage.PeekAt(offset);
+                return true;
             }
         }
 

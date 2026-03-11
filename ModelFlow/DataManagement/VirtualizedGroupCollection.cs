@@ -476,6 +476,144 @@ namespace ModelFlow.DataVirtualization.DataManagement
         }
 
         /// <summary>
+        /// Inserts a new group or updates an existing group and moves it to the requested index.
+        /// </summary>
+        /// <param name="groupKey">The group key.</param>
+        /// <param name="groupIndex">The desired index, computed against the structure excluding the existing group.</param>
+        /// <param name="info">The updated group info.</param>
+        /// <returns>The inserted or updated group, or null if the operation failed.</returns>
+        internal VirtualizedGroup<T>? UpsertGroupAt(string groupKey, int groupIndex, GroupInfo info)
+        {
+            VirtualizedGroup<T>? targetGroup = null;
+            int? originalIndex = null;
+            int? finalIndex = null;
+            bool inserted = false;
+
+            _structureLock.Wait();
+            try
+            {
+                _groups ??= new List<VirtualizedGroup<T>>();
+
+                originalIndex = _groups.FindIndex(group => string.Equals(group.Key, groupKey, StringComparison.Ordinal));
+
+                if (originalIndex < 0)
+                {
+                    if (groupIndex < 0 || groupIndex > _groups.Count)
+                        return null;
+
+                    targetGroup = CreateGroup(groupIndex, info);
+                    _groups.Insert(groupIndex, targetGroup);
+                    inserted = true;
+                    finalIndex = groupIndex;
+
+                    for (int i = groupIndex + 1; i < _groups.Count; i++)
+                    {
+                        _groups[i].UpdateGroupIndex(i);
+                    }
+                }
+                else
+                {
+                    targetGroup = _groups[originalIndex.Value];
+                    targetGroup.UpdateGroupInfo(info);
+
+                    var boundedIndex = groupIndex;
+                    if (boundedIndex < 0)
+                    {
+                        boundedIndex = 0;
+                    }
+                    else if (boundedIndex > _groups.Count - 1)
+                    {
+                        boundedIndex = _groups.Count - 1;
+                    }
+                    if (boundedIndex != originalIndex.Value)
+                    {
+                        _groups.RemoveAt(originalIndex.Value);
+                        if (boundedIndex > _groups.Count)
+                        {
+                            boundedIndex = _groups.Count;
+                        }
+
+                        _groups.Insert(boundedIndex, targetGroup);
+                        finalIndex = boundedIndex;
+
+                        var startIndex = Math.Min(originalIndex.Value, boundedIndex);
+                        for (int i = startIndex; i < _groups.Count; i++)
+                        {
+                            _groups[i].UpdateGroupIndex(i);
+                        }
+                    }
+                    else
+                    {
+                        finalIndex = originalIndex.Value;
+                    }
+                }
+            }
+            finally
+            {
+                _structureLock.Release();
+            }
+
+            if (targetGroup == null || finalIndex == null)
+            {
+                return null;
+            }
+
+            if (inserted)
+            {
+                CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
+                    NotifyCollectionChangedAction.Add, targetGroup, finalIndex.Value));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Count)));
+                return targetGroup;
+            }
+
+            if (originalIndex.HasValue && originalIndex.Value != finalIndex.Value)
+            {
+                CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
+                    NotifyCollectionChangedAction.Move, targetGroup, finalIndex.Value, originalIndex.Value));
+            }
+
+            return targetGroup;
+        }
+
+        /// <summary>
+        /// Removes a group at the specified index.
+        /// </summary>
+        /// <param name="groupIndex">The index of the group to remove.</param>
+        /// <returns>True if the group was removed; otherwise, false.</returns>
+        internal bool RemoveGroupAt(int groupIndex)
+        {
+            VirtualizedGroup<T>? removedGroup = null;
+
+            _structureLock.Wait();
+            try
+            {
+                if (_groups == null || groupIndex < 0 || groupIndex >= _groups.Count)
+                    return false;
+
+                removedGroup = _groups[groupIndex];
+                _groups.RemoveAt(groupIndex);
+
+                for (int i = groupIndex; i < _groups.Count; i++)
+                {
+                    _groups[i].UpdateGroupIndex(i);
+                }
+            }
+            finally
+            {
+                _structureLock.Release();
+            }
+
+            if (removedGroup != null)
+            {
+                CollectionChanged?.Invoke(this, new NotifyCollectionChangedEventArgs(
+                    NotifyCollectionChangedAction.Remove, removedGroup, groupIndex));
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(Count)));
+            }
+
+            return removedGroup != null;
+        }
+
+        /// <summary>
         /// Inserts an item at a specific index within a group.
         /// Only works if the target index is in a loaded page.
         /// </summary>
@@ -489,7 +627,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
                 return false;
 
             var group = _groups[groupIndex];
-            if (!group.IsIndexLoaded(itemIndex))
+            if (!group.HasIndexInMemory(itemIndex))
                 return false;
 
             group.InsertItemAt(itemIndex, item);
@@ -509,7 +647,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
                 return false;
 
             var group = _groups[groupIndex];
-            if (!group.IsIndexLoaded(itemIndex))
+            if (!group.HasIndexInMemory(itemIndex))
             {
                 // Just adjust the count if not loaded
                 group.AdjustCount(-1);

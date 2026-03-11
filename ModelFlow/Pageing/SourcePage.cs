@@ -60,6 +60,16 @@
             return ret;
         }
 
+        public T PeekAt(int offset)
+        {
+            if (offset < 0 || offset >= Items.Count)
+            {
+                return default(T);
+            }
+
+            return Items[offset];
+        }
+
         /// <summary>
         ///     Indexes the of.
         /// </summary>
