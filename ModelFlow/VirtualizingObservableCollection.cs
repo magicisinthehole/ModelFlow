@@ -1069,6 +1069,15 @@
         }
 
         /// <summary>
+        /// Sets the count to an authoritative value without expanding pages.
+        /// Pages beyond the new count are truncated; pages within it are left as-is.
+        /// </summary>
+        internal void SetKnownCount(int count)
+        {
+            GetPaginationManager()?.SetKnownCount(count);
+        }
+
+        /// <summary>
         /// Checks if an index is in a loaded page.
         /// Delegates to PaginationManager.
         /// </summary>

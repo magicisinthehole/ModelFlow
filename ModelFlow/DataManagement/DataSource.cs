@@ -523,17 +523,11 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
 
                 cancellationToken.ThrowIfCancellationRequested();
 
-                if (models.Count != range.Count)
-                {
-                    throw new InvalidOperationException(
-                        $"ReloadLoadedRangesAsync expected {range.Count} items at offset {range.StartIndex} " +
-                        $"but received {models.Count} in {GetType().Name}.");
-                }
+                var itemsToMaterialize = Math.Min(models.Count, range.Count);
 
-                var completionSource = new TaskCompletionSource<bool>();
-                await VirtualizationManager.Instance.RunOnUiAsync(new ActionVirtualizationWrapper(async () =>
+                await VirtualizationManager.Instance.RunOnUiAsync(new AsyncActionVirtualizationWrapper(async () =>
                 {
-                    for (int i = 0; i < models.Count; i++)
+                    for (int i = 0; i < itemsToMaterialize; i++)
                     {
                         var index = range.StartIndex + i;
                         if (!_collection.HasIndexInMemory(index))
@@ -548,11 +542,7 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
 
                         await Materialize(wrapper, models[i]);
                     }
-
-                    completionSource.TrySetResult(true);
                 }));
-
-                await completionSource.Task;
             }
         }
         finally
@@ -574,6 +564,16 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     public void AdjustCount(int delta)
     {
         _collection.AdjustCount(delta);
+    }
+
+    /// <summary>
+    /// Sets the count to an authoritative value from the DB without expanding pages.
+    /// Pages beyond the new count are truncated; pages within it are left as-is.
+    /// New items at new indices are fetched lazily when scrolled to.
+    /// </summary>
+    public void SetKnownCount(int count)
+    {
+        _collection.SetKnownCount(count);
     }
 
     /// <summary>
@@ -642,50 +642,6 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
         }
 
         return null;
-    }
-
-    /// <summary>
-    /// Inserts an item into the current in-memory window without changing the collection count
-    /// by consuming a later placeholder slot in the same contiguous in-memory segment.
-    /// Returns false if no suitable placeholder slot exists.
-    /// </summary>
-    public bool TrySpliceItemByConsumingLaterPlaceholder(int index, TViewModel item)
-    {
-        if (!_collection.HasIndexInMemory(index))
-        {
-            return false;
-        }
-
-        if (IsPlaceholderAtIndex(index))
-        {
-            return ReplaceItemAtIndex(index, item);
-        }
-
-        var segmentEnd = index;
-        var count = _collection.Count;
-        while (segmentEnd + 1 < count && _collection.HasIndexInMemory(segmentEnd + 1))
-        {
-            segmentEnd++;
-        }
-
-        int? placeholderIndex = null;
-        for (int i = segmentEnd; i > index; i--)
-        {
-            if (IsPlaceholderAtIndex(i))
-            {
-                placeholderIndex = i;
-                break;
-            }
-        }
-
-        if (!placeholderIndex.HasValue)
-        {
-            return false;
-        }
-
-        _collection.MoveItem(placeholderIndex.Value, index);
-        _collection[index] = DataItem.Create(item);
-        return true;
     }
 
     /// <summary>
@@ -1180,16 +1136,10 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
 
         if (item != null)
         {
-            var completionSource = new TaskCompletionSource<bool>();
-
-            await VirtualizationManager.Instance.RunOnUiAsync(new ActionVirtualizationWrapper(async () =>
+            await VirtualizationManager.Instance.RunOnUiAsync(new AsyncActionVirtualizationWrapper(async () =>
             {
                 result = await Materialize(item);
-
-                completionSource.SetResult(true);
             }));
-
-            await completionSource.Task;
         }
 
         return result?.Item;
@@ -1408,29 +1358,21 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
 
         cancellationToken.ThrowIfCancellationRequested();
 
-        if (items.Count != count)
-        {
-            throw new Exception(
-                "The number of items returned from the data source is different than expected. This has caused an inconsistent state. Check the DataSource implementation." +
-                this.GetType().FullName);
-        }
+        // During concurrent inserts the page may have more slots than the DB returns
+        // at this offset. Materialize what was returned; remaining slots stay as placeholders
+        // and will be resolved by subsequent fetches or recovery.
+        var itemsToMaterialize = Math.Min(items.Count, count);
 
         var result = new List<DataItem<TViewModel>>();
 
-        var completionSource = new TaskCompletionSource<bool>();
-
-        await VirtualizationManager.Instance.RunOnUiAsync(new ActionVirtualizationWrapper(async () =>
+        await VirtualizationManager.Instance.RunOnUiAsync(new AsyncActionVirtualizationWrapper(async () =>
         {
-            for (int i = 0; i < items.Count; i++)
+            for (int i = 0; i < itemsToMaterialize; i++)
             {
                 result.Add(await Materialize(page, i, items[i]));
             }
-
-            completionSource.SetResult(true);
         }));
 
-        await completionSource.Task;
-        
         EndOperation();
 
         return result;

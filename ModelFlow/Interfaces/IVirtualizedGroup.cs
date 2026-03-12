@@ -58,6 +58,11 @@ namespace ModelFlow.DataVirtualization.Interfaces
         void AdjustCount(int delta);
 
         /// <summary>
+        /// Sets the count to an authoritative value without expanding pages.
+        /// </summary>
+        void SetKnownCount(int count);
+
+        /// <summary>
         /// Checks if the specified index falls within a loaded page.
         /// </summary>
         bool IsIndexLoaded(int index);

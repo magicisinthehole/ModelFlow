@@ -229,6 +229,9 @@
                     _hasGotCount = true;
                 }
             }
+#if DEBUG
+            Serilog.Log.Debug($"[PM.OnReset] id={GetHashCode():x8} count={count} _localCount={_localCount}");
+#endif
 
             if (!IsAsync)
             {
@@ -300,15 +303,13 @@
                     LocalCount = Provider.Count;
                     _hasGotCount = true;
                 }
-                else if (!asyncOk)
-                {
-                    LocalCount = ProviderAsync.GetCountAsync().GetAwaiter().GetResult();
-                    _hasGotCount = true;
-                }
                 else
                 {
-                    var cts = StartPageRequest(int.MinValue);
-                    Task.Run(async ()=> await GetCountAsync(cts), cts.Token);
+                    LocalCount = ProviderAsync.GetCountAsync().GetAwaiter().GetResult();
+#if DEBUG
+                    Serilog.Log.Debug($"[PM.GetCount] id={GetHashCode():x8} sync fetch: _localCount={_localCount}");
+#endif
+                    _hasGotCount = true;
                 }
             }
             
@@ -963,30 +964,6 @@
             newPage.PageFetchState = PageFetchStateEnum.Fetched;
         }
 
-        private async Task GetCountAsync(CancellationTokenSource cts)
-        {
-            if (!cts.IsCancellationRequested)
-            {
-                var ret = await ProviderAsync.GetCountAsync();
-
-                if (!cts.IsCancellationRequested)
-                {
-                    //TODO<-lock (this.SyncRoot)
-                    lock (this)
-                    {
-                        _hasGotCount = true;
-                        LocalCount = ret;
-                    }
-                }
-
-                if (!cts.IsCancellationRequested)
-                {
-                    RaiseCountChanged(true, LocalCount);
-                }
-            }
-
-            RemovePageRequest(int.MinValue);
-        }
 
 
         private void OnProviderCollectionChanged(object sender,
@@ -1084,6 +1061,9 @@
             }
 
             Interlocked.Increment(ref _localCount);
+#if DEBUG
+            Serilog.Log.Debug($"[PM.OnAppend] id={GetHashCode():x8} _localCount={_localCount}");
+#endif
 
             var edit = GetProviderAsEditable();
             if (edit != null && !isAlreadyInSourceCollection)
@@ -1118,16 +1098,6 @@
                 {
                     ret = _pages[page];
                     _reclaimer.OnPageTouched(ret);
-
-                    if (IsAsync && voc != null && ret.PageFetchState == PageFetchStateEnum.Placeholders &&
-                        !_tasks.ContainsKey(page))
-                    {
-                        var pageOffset = (page - _basePage) * PageSize + (from d in _deltas.Values
-                                         where d.Page < page
-                                         select d.Delta).Sum();
-
-                        QueuePageFetch(ret, voc, page, pageOffset, ret.ItemsPerPage);
-                    }
                 }
                 else
                 {
@@ -1167,20 +1137,15 @@
 
         private ISourcePage<T> CreateNewPage(int page, out int pageSize, out int pageOffset)
         {
-            PageDelta delta = null;
-            if (_deltas.ContainsKey(page))
-            {
-                delta = _deltas[page];
-            }
-
             pageOffset = (page - _basePage) * PageSize + (from d in _deltas.Values
                              where d.Page < page
                              select d.Delta).Sum();
             pageSize = Math.Min(this.PageSize, this.GetCount(false) - pageOffset);
-            if (delta != null)
-            {
-                pageSize += delta.Delta;
-            }
+            if (_deltas.ContainsKey(page))
+                pageSize += _deltas[page].Delta;
+#if DEBUG
+            Serilog.Log.Debug($"[PM.CreateNewPage] id={GetHashCode():x8} page={page} _localCount={_localCount} pageOffset={pageOffset} pageSize={pageSize}");
+#endif
 
             var newPage = _reclaimer.MakePage(page, pageSize);
             _pages.Add(page, newPage);
@@ -1232,22 +1197,6 @@
             return addedPlaceholders;
         }
 
-        private static bool PageHasLoadingItems(ISourcePage<T> page)
-        {
-            // Completion should be based on the current requested page shape, not any stale
-            // wrappers that may still exist beyond ItemsPerPage after prior inserts/removes.
-            for (var i = 0; i < page.ItemsPerPage; i++)
-            {
-                var item = page.PeekAt(i);
-                if (item == null || item.IsLoading)
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
         private async Task DoRealPageGet(object voc, ISourcePage<T> page, int pageOffset, int requestedCount,
             CancellationTokenSource cts)
         {
@@ -1258,16 +1207,17 @@
 
             try
             {
-                var data = new PagedSourceItemsPacket<T>(await ProviderAsync.GetItemsAtAsync(page, pageOffset, requestedCount, null, cts.Token));
+                var loadedAt = DateTime.Now;
+                // Read current page size at execution time — concurrent inserts may have
+                // grown the page since the fetch was queued. The items are already in the
+                // DB (inserts commit before OnInsert), so the query returns all of them.
+                var actualCount = page.ItemsPerPage;
+                var items = (await ProviderAsync.GetItemsAtAsync(page, pageOffset, actualCount, null, cts.Token)).ToList();
 
                 if (cts.IsCancellationRequested)
                 {
                     return;
                 }
-
-                var needsRefetch = false;
-                var currentPageOffset = pageOffset;
-                var currentRequestedCount = requestedCount;
 
                 lock (PageLock)
                 {
@@ -1277,26 +1227,53 @@
                         return;
                     }
 
-                    currentPageOffset = CalculatePageOffset(page.Page);
-                    currentRequestedCount = page.ItemsPerPage;
-                    needsRefetch = currentPageOffset != pageOffset
-                        || currentRequestedCount != requestedCount
-                        || PageHasLoadingItems(page);
+                    page.WiredDateTime = loadedAt;
 
-                    page.WiredDateTime = data.LoadedAt;
-                    page.PageFetchState = needsRefetch
-                        ? PageFetchStateEnum.Placeholders
-                        : PageFetchStateEnum.Fetched;
-                    RemovePageRequest(page.Page);
-                }
-
-                if (needsRefetch && !cts.IsCancellationRequested)
-                {
-                    QueuePageFetch(page, voc, page.Page, currentPageOffset, currentRequestedCount);
+                    if (page.ItemsCount > items.Count)
+                    {
+                        if (items.Count < actualCount)
+                        {
+                            // DB returned fewer items than requested — this is the
+                            // true end of data. Trim excess placeholders.
+                            while (page.ItemsCount > items.Count)
+                                page.RemoveAt(page.ItemsCount - 1, null, null);
+                            if (page.ItemsPerPage > items.Count)
+                                page.ItemsPerPage = items.Count;
+                            page.PageFetchState = PageFetchStateEnum.Fetched;
+                            RemovePageRequest(page.Page);
+                        }
+                        else
+                        {
+                            // DB had enough data but page grew from concurrent
+                            // inserts during fetch — re-fetch to cover them.
+                            RemovePageRequest(page.Page);
+                            var newPageOffset = CalculatePageOffset(page.Page);
+                            QueuePageFetch(page, voc, page.Page, newPageOffset, page.ItemsPerPage);
+                        }
+                    }
+                    else
+                    {
+                        page.PageFetchState = PageFetchStateEnum.Fetched;
+                        RemovePageRequest(page.Page);
+                    }
                 }
             }
             catch (OperationCanceledException)
             {
+                RemovePageRequest(page.Page);
+            }
+            catch (Exception)
+            {
+                // Remove the failed page so the next access creates a fresh one and retries.
+                lock (PageLock)
+                {
+                    if (_pages.TryGetValue(page.Page, out var currentPage) && ReferenceEquals(currentPage, page))
+                    {
+                        _pages.Remove(page.Page);
+                        _reclaimer.OnPageReleased(page);
+                    }
+                }
+
                 RemovePageRequest(page.Page);
             }
         }
@@ -1321,68 +1298,78 @@
         public void OnInsert(int index, T item, object timestamp)
         {
             if (!_hasGotCount)
-            {
                 EnsureCount();
-            }
 
             CalculateFromIndex(index, out var page, out var offset);
 
-            var voc = _getVoc();
-            var dataPage = SafeGetPage(page, voc, index);
-            var pageOffset = CalculatePageOffset(page);
-
-            var addedPlaceholders = EnsureInsertCapacity(dataPage, page, pageOffset, offset);
-
-            dataPage.InsertAt(offset, item, timestamp, ExpiryComparer);
-
-            var adj = AddOrUpdateAdjustment(page, 1);
-
-            if (dataPage.ItemsPerPage < dataPage.ItemsCount)
+            if (IsPageWired(page))
             {
-                dataPage.ItemsPerPage = dataPage.ItemsCount;
-            }
+                var dataPage = SafeGetPage(page, null, index);
 
-            if (page == _basePage && adj == PageSize * 2)
-            {
-                lock (PageLock)
+                var pageOffset = CalculatePageOffset(page);
+
+                if (IsAsync && ProviderAsync != null && dataPage.ItemsCount == 0 && dataPage.ItemsPerPage > 0)
                 {
-                    if (IsPageWired(page))
+                    for (var i = 0; i < dataPage.ItemsPerPage; i++)
                     {
-                        ISourcePage<T> newdataPage = null;
-                        if (IsPageWired(page - 1))
-                        {
-                            newdataPage = SafeGetPage(page - 1, null, index);
-                        }
-                        else
-                        {
-                            newdataPage = _reclaimer.MakePage(page - 1, PageSize);
-                            _pages.Add(page - 1, newdataPage);
-                        }
-
-                        for (var loop = 0; loop < PageSize; loop++)
-                        {
-                            var i = dataPage.GetAt(0);
-
-                            dataPage.RemoveAt(0, null, null);
-                            newdataPage.Append(i, null, null);
-                        }
+                        var placeholder = ProviderAsync.GetPlaceHolder(pageOffset + i, page, i);
+                        dataPage.Append(placeholder, null, ExpiryComparer);
                     }
+                    dataPage.PageFetchState = PageFetchStateEnum.Placeholders;
+                }
 
-                    AddOrUpdateAdjustment(page, -PageSize);
+                dataPage.InsertAt(offset, item, timestamp, ExpiryComparer);
 
-                    _basePage--;
+                if (dataPage.ItemsPerPage < dataPage.ItemsCount)
+                {
+                    dataPage.ItemsPerPage = dataPage.ItemsCount;
+                }
+
+                if (dataPage.PageFetchState == PageFetchStateEnum.Placeholders && !_tasks.ContainsKey(page))
+                {
+                    QueuePageFetch(dataPage, _getVoc(), page, pageOffset, dataPage.ItemsPerPage);
+                }
+
+                var adj = AddOrUpdateAdjustment(page, 1);
+
+                if (page == _basePage && adj == PageSize * 2)
+                {
+                    lock (PageLock)
+                    {
+                        if (IsPageWired(page))
+                        {
+                            ISourcePage<T> newdataPage = null;
+                            if (IsPageWired(page - 1))
+                            {
+                                newdataPage = SafeGetPage(page - 1, null, index);
+                            }
+                            else
+                            {
+                                newdataPage = _reclaimer.MakePage(page - 1, PageSize);
+                                _pages.Add(page - 1, newdataPage);
+                            }
+
+                            for (var loop = 0; loop < PageSize; loop++)
+                            {
+                                var i = dataPage.GetAt(0);
+
+                                dataPage.RemoveAt(0, null, null);
+                                newdataPage.Append(i, null, null);
+                            }
+                        }
+
+                        AddOrUpdateAdjustment(page, -PageSize);
+
+                        _basePage--;
+                    }
                 }
             }
-
-            if (addedPlaceholders && IsAsync && voc != null)
+            else
             {
-                lock (PageLock)
-                {
-                    if (!_tasks.ContainsKey(page))
-                    {
-                        QueuePageFetch(dataPage, voc, page, pageOffset, dataPage.ItemsPerPage);
-                    }
-                }
+                // Page not loaded — record the delta so CalculateFromIndex stays
+                // correct when this page is eventually fetched. Don't create the
+                // page or queue a fetch; the data lives in the provider.
+                AddOrUpdateAdjustment(page, 1);
             }
 
             var edit = GetProviderAsEditable();
@@ -1396,7 +1383,15 @@
                 CollectionChanged?.Invoke(this, args);
             }
 
-            Interlocked.Increment(ref _localCount);
+            // Set count from DB — incrementing double-counts items already included in the DB total.
+            // Query here (insert thread) rather than invalidating _hasGotCount, which would
+            // defer the query to the next GetCount call on the UI thread.
+            _localCount = IsAsync
+                ? ProviderAsync.GetCountAsync().GetAwaiter().GetResult()
+                : Provider.Count;
+#if DEBUG
+            Serilog.Log.Debug($"[PM.OnInsert] id={GetHashCode():x8} index={index} _localCount={_localCount} wired={IsPageWired(page)}");
+#endif
         }
 
         public void OnReplace(int index, T oldItem, T newItem, object timestamp)
@@ -1667,27 +1662,53 @@
             {
                 if (!_hasGotCount)
                 {
-                    // Count not yet fetched - item is in DB, will appear when fetched
                     return;
                 }
 
                 newCount = Interlocked.Add(ref _localCount, delta);
             }
 
-            ResizeExistingPagesForCount(newCount);
-
             // Notify outside lock to prevent deadlocks
             RaiseCountChanged(needsReset: false, newCount);
         }
 
-        private void ResizeExistingPagesForCount(int newCount)
+        /// <summary>
+        /// Sets the count to an authoritative value without expanding or refetching pages.
+        /// Pages beyond the new count are removed; pages within it are left as-is.
+        /// Use this instead of AdjustCount when the caller has the true count from the DB.
+        /// </summary>
+        public void SetKnownCount(int count)
+        {
+            int newCount;
+            bool wasEmpty;
+            lock (SyncRoot)
+            {
+                if (!_hasGotCount)
+                {
+                    return;
+                }
+
+                wasEmpty = _localCount == 0;
+                newCount = Math.Max(0, count);
+#if DEBUG
+                Serilog.Log.Debug($"[PM.SetKnownCount] id={GetHashCode():x8} {_localCount} -> {newCount}");
+#endif
+                _localCount = newCount;
+            }
+
+            TruncatePagesForCount(newCount);
+
+            // When transitioning from empty to populated, raise Reset so the UI
+            // framework knows to start requesting items. No pages exist to preserve.
+            RaiseCountChanged(needsReset: wasEmpty && newCount > 0, newCount);
+        }
+
+        private void TruncatePagesForCount(int newCount)
         {
             if (!IsAsync || ProviderAsync == null)
             {
                 return;
             }
-
-            var voc = _getVoc?.Invoke();
 
             lock (PageLock)
             {
@@ -1706,12 +1727,6 @@
                     if (expectedSize <= 0)
                     {
                         pagesToRemove.Add(pageNumber);
-                        continue;
-                    }
-
-                    if (page.ItemsPerPage < expectedSize)
-                    {
-                        ExpandPage(page, pageNumber, pageOffset, expectedSize, voc);
                         continue;
                     }
 
@@ -1749,23 +1764,6 @@
             return Math.Max(0, pageSize);
         }
 
-        private void ExpandPage(ISourcePage<T> page, int pageNumber, int pageOffset, int expectedSize, object? voc)
-        {
-            var previousCount = page.ItemsCount;
-            page.ItemsPerPage = expectedSize;
-
-            for (var i = previousCount; i < expectedSize; i++)
-            {
-                var placeholder = ProviderAsync.GetPlaceHolder(pageOffset + i, pageNumber, i);
-                page.Append(placeholder, null, ExpiryComparer);
-            }
-
-            page.PageFetchState = PageFetchStateEnum.Placeholders;
-            if (voc != null && !_tasks.ContainsKey(pageNumber))
-            {
-                QueuePageFetch(page, voc, pageNumber, pageOffset, expectedSize);
-            }
-        }
 
         private void ShrinkPage(ISourcePage<T> page, int expectedSize)
         {

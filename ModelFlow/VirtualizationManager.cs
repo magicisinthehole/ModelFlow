@@ -159,11 +159,31 @@
         
         internal async Task RunOnUiAsync(IVirtualizationAction action)
         {
-            if (UiThreadExcecuteAction == null) // PLV
+            if (UiThreadExcecuteAction == null)
                 throw new Exception(
                     "VirtualizationManager isn’t already initialized !  set the VirtualizationManager’s UIThreadExcecuteAction (VirtualizationManager.Instance.UIThreadExcecuteAction = a => Dispatcher.Invoke( a );)");
-            
-            await UiThreadExcecuteAction.Invoke(action.DoAction);
+
+            if (action is IAsyncVirtualizationAction asyncAction)
+            {
+                var tcs = new TaskCompletionSource<bool>();
+                await UiThreadExcecuteAction.Invoke(() =>
+                {
+                    asyncAction.DoActionAsync().ContinueWith(t =>
+                    {
+                        if (t.IsFaulted)
+                            tcs.TrySetException(t.Exception!.InnerExceptions);
+                        else if (t.IsCanceled)
+                            tcs.TrySetCanceled();
+                        else
+                            tcs.TrySetResult(true);
+                    }, TaskScheduler.Default);
+                });
+                await tcs.Task;
+            }
+            else
+            {
+                await UiThreadExcecuteAction.Invoke(action.DoAction);
+            }
         }
         
     }

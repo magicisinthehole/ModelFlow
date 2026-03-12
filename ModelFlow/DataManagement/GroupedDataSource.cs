@@ -819,17 +819,11 @@ namespace ModelFlow.DataVirtualization.DataManagement
 
                     cancellationToken.ThrowIfCancellationRequested();
 
-                    if (models.Count != range.Count)
-                    {
-                        throw new InvalidOperationException(
-                            $"ReloadLoadedRangesInGroupAsync expected {range.Count} items at offset {range.StartIndex} " +
-                            $"for group '{groupKey}' but received {models.Count} in {GetType().Name}.");
-                    }
+                    var itemsToMaterialize = Math.Min(models.Count, range.Count);
 
-                    var completionSource = new TaskCompletionSource<bool>();
-                    await VirtualizationManager.Instance.RunOnUiAsync(new ActionVirtualizationWrapper(async () =>
+                    await VirtualizationManager.Instance.RunOnUiAsync(new AsyncActionVirtualizationWrapper(async () =>
                     {
-                        for (int i = 0; i < models.Count; i++)
+                        for (int i = 0; i < itemsToMaterialize; i++)
                         {
                             var index = range.StartIndex + i;
                             if (!group.HasIndexInMemory(index))
@@ -844,11 +838,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
 
                             await Materialize(wrapper, models[i]);
                         }
-
-                        completionSource.TrySetResult(true);
                     }));
-
-                    await completionSource.Task;
                 }
             }
             finally
@@ -1147,6 +1137,16 @@ namespace ModelFlow.DataVirtualization.DataManagement
         }
 
         /// <summary>
+        /// Sets the count for a specific group to an authoritative value without expanding pages.
+        /// Pages beyond the new count are truncated; pages within it are left as-is.
+        /// </summary>
+        public void SetGroupKnownCount(string groupKey, int count)
+        {
+            var group = GetGroupByKey(groupKey);
+            group?.SetKnownCount(count);
+        }
+
+        /// <summary>
         /// Checks if a specific index within a group falls within a currently loaded page.
         /// Use this to decide whether to insert in-memory or just adjust count.
         /// </summary>
@@ -1247,29 +1247,17 @@ namespace ModelFlow.DataVirtualization.DataManagement
 
                 var models = (await GetGroupItemsAsync(groupKey, offset, count, x => BuildFilterSortQuery(x, filter), cancellationToken)).ToList();
 
-                if (models.Count != count)
-                {
-                    throw new Exception(
-                        "The number of items returned from the data source is different than expected. " +
-                        "This has caused an inconsistent state. Check the GroupedDataSource implementation. " +
-                        this.GetType().FullName);
-                }
+                var itemsToMaterialize = Math.Min(models.Count, count);
 
                 var results = new List<DataItem<TViewModel>>();
 
-                var completionSource = new TaskCompletionSource<bool>();
-
-                // Materialize on UI thread to update placeholders in place
-                await VirtualizationManager.Instance.RunOnUiAsync(new ActionVirtualizationWrapper(async () =>
+                await VirtualizationManager.Instance.RunOnUiAsync(new AsyncActionVirtualizationWrapper(async () =>
                 {
-                    for (int i = 0; i < models.Count; i++)
+                    for (int i = 0; i < itemsToMaterialize; i++)
                     {
                         results.Add(await Materialize(page, i, models[i]));
                     }
-                    completionSource.SetResult(true);
                 }));
-
-                await completionSource.Task;
 
                 return results;
             }

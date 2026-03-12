@@ -144,8 +144,10 @@ namespace ModelFlow.DataVirtualization.DataManagement
         {
             if (_isStructureLoaded) return;
 
-            // Use async version and wait - SemaphoreSlim handles this correctly
-            EnsureStructureLoadedAsync().GetAwaiter().GetResult();
+            // Offload to threadpool to avoid deadlock: LoadStructureInternalAsync uses
+            // RunOnUiAsync to marshal back to UI, so blocking the UI thread here
+            // with GetAwaiter().GetResult() would deadlock.
+            Task.Run(() => EnsureStructureLoadedAsync()).GetAwaiter().GetResult();
         }
 
         /// <summary>
@@ -631,6 +633,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
                 return false;
 
             group.InsertItemAt(itemIndex, item);
+            RaiseGroupItemCountChanged(groupIndex, group);
             return true;
         }
 
@@ -651,10 +654,12 @@ namespace ModelFlow.DataVirtualization.DataManagement
             {
                 // Just adjust the count if not loaded
                 group.AdjustCount(-1);
+                RaiseGroupItemCountChanged(groupIndex, group);
                 return true;
             }
 
             group.RemoveItemAt(itemIndex);
+            RaiseGroupItemCountChanged(groupIndex, group);
             return true;
         }
 
@@ -670,6 +675,14 @@ namespace ModelFlow.DataVirtualization.DataManagement
 
             var group = _groups[groupIndex];
             group.AppendItem(item);
+            RaiseGroupItemCountChanged(groupIndex, group);
+        }
+
+        private void RaiseGroupItemCountChanged(int groupIndex, VirtualizedGroup<T> group)
+        {
+            CollectionChanged?.Invoke(this,
+                new NotifyCollectionChangedEventArgs(
+                    NotifyCollectionChangedAction.Replace, group, group, groupIndex));
         }
 
         #endregion

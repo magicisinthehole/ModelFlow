@@ -160,6 +160,15 @@ namespace ModelFlow.DataVirtualization.DataManagement
         }
 
         /// <inheritdoc />
+        public void SetKnownCount(int count)
+        {
+            var previous = _paginationManager.Count;
+            _paginationManager.SetKnownCount(count);
+            if (previous != _paginationManager.Count)
+                PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ItemCount)));
+        }
+
+        /// <inheritdoc />
         public bool IsIndexLoaded(int index)
         {
             return _paginationManager.IsIndexLoaded(index);
@@ -189,6 +198,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
         internal void AppendItem(DataItem<T> item)
         {
             _paginationManager.Append(item);
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ItemCount)));
         }
 
         /// <summary>
@@ -200,6 +210,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
         internal void InsertItemAt(int index, DataItem<T> item)
         {
             _paginationManager.InsertAt(index, item);
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ItemCount)));
         }
 
         /// <summary>
@@ -210,6 +221,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
         internal void RemoveItemAt(int index)
         {
             _paginationManager.RemoveAt(index);
+            PropertyChanged?.Invoke(this, new PropertyChangedEventArgs(nameof(ItemCount)));
         }
 
         #endregion
