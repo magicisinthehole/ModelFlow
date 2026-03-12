@@ -478,6 +478,9 @@
                         else
                         {
                             datapage.InsertAt(offset, placeholder, null, null);
+                            // Keep ItemsPerPage in sync so DoRealPageGet requests enough items
+                            if (datapage.ItemsPerPage < datapage.ItemsCount)
+                                datapage.ItemsPerPage = datapage.ItemsCount;
                         }
 
                         datapage.PageFetchState = PageFetchStateEnum.Placeholders;
@@ -1383,12 +1386,9 @@
                 CollectionChanged?.Invoke(this, args);
             }
 
-            // Set count from DB — incrementing double-counts items already included in the DB total.
-            // Query here (insert thread) rather than invalidating _hasGotCount, which would
-            // defer the query to the next GetCount call on the UI thread.
-            _localCount = IsAsync
-                ? ProviderAsync.GetCountAsync().GetAwaiter().GetResult()
-                : Provider.Count;
+            // Mirror OnRemove's Interlocked.Decrement — keep _localCount consistent.
+            // Callers with the authoritative DB count can follow up with SetKnownCount.
+            Interlocked.Increment(ref _localCount);
 #if DEBUG
             Serilog.Log.Debug($"[PM.OnInsert] id={GetHashCode():x8} index={index} _localCount={_localCount} wired={IsPageWired(page)}");
 #endif
