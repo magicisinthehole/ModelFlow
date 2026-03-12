@@ -270,11 +270,6 @@ namespace ModelFlow.DataVirtualization.DataManagement
             if (!IsInitialized)
             {
                 await EnsureStructureLoadedAsync();
-
-                while (!IsInitialized)
-                {
-                    await Task.Delay(10);
-                }
             }
         }
 
