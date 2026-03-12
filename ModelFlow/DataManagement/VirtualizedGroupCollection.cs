@@ -51,7 +51,6 @@ namespace ModelFlow.DataVirtualization.DataManagement
             _itemPageSize = itemPageSize;
             _maxItemPagesPerGroup = maxItemPagesPerGroup;
 
-            // Register with VirtualizationManager for automatic memory reclamation
             VirtualizationManager.Instance.AddAction(new ReclaimPagesWA(this, "GroupCollection"));
         }
 

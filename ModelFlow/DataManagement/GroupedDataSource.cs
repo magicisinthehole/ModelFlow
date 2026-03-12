@@ -1177,7 +1177,6 @@ namespace ModelFlow.DataVirtualization.DataManagement
 
         void IBaseSourceProvider.OnReset(int count)
         {
-            // Reset handled by collection
         }
 
         async Task<int> IGroupedSourceProviderAsync<DataItem<TViewModel>>.GetGroupCountAsync()
