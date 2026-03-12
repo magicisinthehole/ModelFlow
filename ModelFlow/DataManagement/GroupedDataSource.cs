@@ -997,34 +997,16 @@ namespace ModelFlow.DataVirtualization.DataManagement
             if (structure == null || structure.Count == 0)
                 return 0;
 
-            // Binary search for the correct position
-            int left = 0;
-            int right = structure.Count - 1;
-
-            while (left <= right)
+            if (excludedGroupKey != null)
             {
-                int mid = (left + right) / 2;
-                if (excludedGroupKey != null &&
-                    string.Equals(structure[mid].Key, excludedGroupKey, StringComparison.Ordinal))
-                {
-                    var reduced = structure
-                        .Where(group => !string.Equals(group.Key, excludedGroupKey, StringComparison.Ordinal))
-                        .ToList();
+                var reduced = structure
+                    .Where(group => !string.Equals(group.Key, excludedGroupKey, StringComparison.Ordinal))
+                    .ToList();
 
-                    return GetInsertionIndexFromStructure(reduced, groupKey, headerData);
-                }
-
-                int cmp = CompareGroupForInsertion(structure[mid], groupKey, headerData);
-
-                if (cmp < 0)
-                    left = mid + 1;
-                else if (cmp > 0)
-                    right = mid - 1;
-                else
-                    return mid; // Exact match (shouldn't happen for new group)
+                return GetInsertionIndexFromStructure(reduced, groupKey, headerData);
             }
 
-            return left;
+            return GetInsertionIndexFromStructure(structure, groupKey, headerData);
         }
 
         private int GetInsertionIndexFromStructure(IReadOnlyList<GroupInfo> structure, string groupKey, object? headerData)
