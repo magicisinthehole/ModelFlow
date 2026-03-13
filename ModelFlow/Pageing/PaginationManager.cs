@@ -1375,6 +1375,8 @@
                 AddOrUpdateAdjustment(page, 1);
             }
 
+            Interlocked.Increment(ref _localCount);
+
             var edit = GetProviderAsEditable();
             if (edit != null)
             {
@@ -1386,9 +1388,6 @@
                 CollectionChanged?.Invoke(this, args);
             }
 
-            // Mirror OnRemove's Interlocked.Decrement — keep _localCount consistent.
-            // Callers with the authoritative DB count can follow up with SetKnownCount.
-            Interlocked.Increment(ref _localCount);
 #if DEBUG
             Serilog.Log.Debug($"[PM.OnInsert] id={GetHashCode():x8} index={index} _localCount={_localCount} wired={IsPageWired(page)}");
 #endif
@@ -1522,6 +1521,8 @@
                 }
             }
 
+            Interlocked.Decrement(ref _localCount);
+
             if (Provider is IEditableProviderIndexBased<T> editableProvider)
             {
                 item = editableProvider.OnRemove(index, timestamp);
@@ -1531,8 +1532,6 @@
                 var args = new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Remove, item, index);
                 CollectionChanged?.Invoke(this, args);
             }
-
-            Interlocked.Decrement(ref _localCount);
 
             return item;
         }
@@ -1602,6 +1601,8 @@
                 }
             }
 
+            Interlocked.Decrement(ref _localCount);
+
             if (Provider is IEditableProviderItemBased<T> editableProvider)
             {
                 editableProvider.OnRemove(item, timestamp);
@@ -1611,8 +1612,6 @@
                 var args = new NotifyCollectionChangedEventArgs(NotifyCollectionChangedAction.Remove, item, index);
                 CollectionChanged?.Invoke(this, args);
             }
-
-            Interlocked.Decrement(ref _localCount);
 
             return pageIndex;
         }
@@ -1658,6 +1657,7 @@
         public void AdjustCount(int delta)
         {
             int newCount;
+            bool wasEmpty;
             lock (SyncRoot)
             {
                 if (!_hasGotCount)
@@ -1665,11 +1665,15 @@
                     return;
                 }
 
-                newCount = Interlocked.Add(ref _localCount, delta);
+                wasEmpty = _localCount == 0;
+                newCount = Math.Max(0, Interlocked.Add(ref _localCount, delta));
+                _localCount = newCount;
             }
 
+            TruncatePagesForCount(newCount);
+
             // Notify outside lock to prevent deadlocks
-            RaiseCountChanged(needsReset: false, newCount);
+            RaiseCountChanged(needsReset: wasEmpty && newCount > 0, newCount);
         }
 
         /// <summary>

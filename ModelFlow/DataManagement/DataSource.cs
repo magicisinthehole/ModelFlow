@@ -651,13 +651,18 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
 
     /// <summary>
     /// Inserts an item at a specific index without invalidating.
-    /// Only call this if HasIndexInMemory(index) returns true.
+    /// Only works for indices backed by an in-memory page.
     /// </summary>
     /// <param name="index">The sorted index to insert at.</param>
     /// <param name="item">The item to insert.</param>
-    /// <returns>The created DataItem wrapper.</returns>
-    public DataItem<TViewModel> InsertItemAtIndex(int index, TViewModel item)
+    /// <returns>The created DataItem wrapper, or null if the index is not in memory.</returns>
+    public DataItem<TViewModel>? InsertItemAtIndex(int index, TViewModel item)
     {
+        if (!_collection.HasIndexInMemory(index))
+        {
+            return null;
+        }
+
         var dataItem = DataItem.Create(item);
         _collection.Insert(index, dataItem);  // Uses existing Insert method
         return dataItem;
