@@ -669,6 +669,18 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     }
 
     /// <summary>
+    /// Records an insert at the specified index even when that slot is not currently in memory.
+    /// This preserves index-shift notifications for controls that already have later ranges realized,
+    /// while leaving actual item materialization to the normal page-fetch path.
+    /// </summary>
+    public DataItem<TViewModel> RecordInsertAtIndex(int index, TViewModel item)
+    {
+        var dataItem = DataItem.Create(item);
+        _collection.Insert(index, dataItem);
+        return dataItem;
+    }
+
+    /// <summary>
     /// Replaces the item wrapper at the specified in-memory index without changing the collection count.
     /// This is valid for both loaded rows and placeholder-backed slots that need materializing.
     /// </summary>
