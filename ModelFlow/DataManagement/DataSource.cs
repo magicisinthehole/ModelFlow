@@ -658,13 +658,18 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     /// <returns>The created DataItem wrapper, or null if the index is not in memory.</returns>
     public DataItem<TViewModel>? InsertItemAtIndex(int index, TViewModel item)
     {
-        if (!_collection.HasIndexInMemory(index))
+        // Allow insertion within a loaded page, at the append position
+        // when the preceding item's page is loaded, or at index 0 when
+        // the collection is empty but has been initialized
+        if (!_collection.HasIndexInMemory(index) &&
+            !(index > 0 && _collection.HasIndexInMemory(index - 1)) &&
+            !(index == 0 && _collection.Count == 0 && _collection.HasGotCount))
         {
             return null;
         }
 
         var dataItem = DataItem.Create(item);
-        _collection.Insert(index, dataItem);  // Uses existing Insert method
+        _collection.Insert(index, dataItem);
         return dataItem;
     }
 

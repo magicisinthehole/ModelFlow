@@ -728,6 +728,45 @@
             }
         }
 
+        /// Removes an item from the page state at the given global index.
+        /// Caller must hold PageLock.
+        private void RemoveFromPageState(int removedIndex)
+        {
+            CalculateFromIndex(removedIndex, out var page, out var offset);
+
+            if (IsPageWired(page))
+            {
+                var dataPage = SafeGetPage(page, null, removedIndex);
+                if (offset < dataPage.ItemsCount)
+                {
+                    dataPage.RemoveAt(offset, null, null);
+                }
+
+                if (dataPage.ItemsPerPage > 0)
+                {
+                    dataPage.ItemsPerPage--;
+                }
+            }
+
+            // AddOrUpdateAdjustment re-enters PageLock (safe — Monitor is re-entrant)
+            AddOrUpdateAdjustment(page, -1);
+
+            if (page == _basePage)
+            {
+                var items = PageSize;
+                if (_deltas.ContainsKey(page))
+                {
+                    items += _deltas[page].Delta;
+                }
+
+                if (items == 0)
+                {
+                    _deltas.Remove(page);
+                    _basePage++;
+                }
+            }
+        }
+
         /// <summary>
         ///     Drops all deltas and pages.
         /// </summary>
@@ -988,8 +1027,31 @@
                         notifyCollectionChangedEventArgs); // check if this.OnAppend does not raise collection change as well
                     //this.RaiseCountChanged(true, this._localCount);
                     break;
+                case NotifyCollectionChangedAction.Remove:
+                    if (_hasGotCount && notifyCollectionChangedEventArgs.OldStartingIndex >= 0)
+                    {
+                        var removedIndex = notifyCollectionChangedEventArgs.OldStartingIndex;
+                        lock (PageLock)
+                        {
+                            RemoveFromPageState(removedIndex);
+                        }
+
+                        Interlocked.Decrement(ref _localCount);
+                    }
+                    else
+                    {
+                        lock (PageLock)
+                        {
+                            _hasGotCount = false;
+                            CancelAllRequests();
+                            DropAllDeltasAndPages();
+                        }
+                    }
+
+                    CollectionChanged?.Invoke(sender, notifyCollectionChangedEventArgs);
+                    break;
+
                 case NotifyCollectionChangedAction.Reset:
-                case NotifyCollectionChangedAction.Remove: //TODO
                     lock (PageLock)
                     {
                         _hasGotCount = false;
@@ -1482,43 +1544,16 @@
 
         public T OnRemove(int index, object timestamp)
         {
-            T item;
-
             if (!_hasGotCount)
             {
                 EnsureCount();
             }
 
-            CalculateFromIndex(index, out var page, out var offset);
+            var item = GetAt(index, Provider);
 
-            item = GetAt(index, Provider);
-            if (IsPageWired(page))
+            lock (PageLock)
             {
-                var dataPage = SafeGetPage(page, null, index);
-                dataPage.RemoveAt(offset, timestamp, ExpiryComparer);
-
-                // Keep ItemsPerPage in sync with actual item count
-                if (dataPage.ItemsPerPage > 0)
-                {
-                    dataPage.ItemsPerPage--;
-                }
-            }
-
-            AddOrUpdateAdjustment(page, -1);
-
-            if (page == _basePage)
-            {
-                var items = PageSize;
-                if (_deltas.ContainsKey(page))
-                {
-                    items += _deltas[page].Delta;
-                }
-
-                if (items == 0)
-                {
-                    _deltas.Remove(page);
-                    _basePage++;
-                }
+                RemoveFromPageState(index);
             }
 
             Interlocked.Decrement(ref _localCount);
@@ -1698,6 +1733,13 @@
                 Serilog.Log.Debug($"[PM.SetKnownCount] id={GetHashCode():x8} {_localCount} -> {newCount}");
 #endif
                 _localCount = newCount;
+            }
+
+            // Authoritative count supersedes accumulated deltas — clear them
+            // so TruncatePagesForCount doesn't double-count local modifications.
+            lock (PageLock)
+            {
+                _deltas.Clear();
             }
 
             TruncatePagesForCount(newCount);
