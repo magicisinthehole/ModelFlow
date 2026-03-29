@@ -691,12 +691,12 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
     /// </summary>
     public bool ReplaceItemAtIndex(int index, TViewModel item)
     {
-        if (!_collection.HasIndexInMemory(index))
+        if (!_collection.TryGetInMemoryValue(index, out var existing))
         {
             return false;
         }
 
-        _collection[index] = DataItem.Create(item);
+        existing.UpdateItem(item);
         return true;
     }
 
