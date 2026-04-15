@@ -1261,6 +1261,40 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
         return await IndexOfAsync(item, x => BuildFilterSortQuery(x, _filterQuery));
     }
 
+    /// <summary>
+    /// Resolves a property or field by name, walking base interfaces when the target type is
+    /// an interface. <see cref="Type.GetProperty(string)"/> on an interface only returns members
+    /// declared directly on it, not inherited members from base interfaces, so when TModel is an
+    /// interface that inherits sortable members from a base (e.g. IAlbumArtist : INamedEntity),
+    /// the standard <see cref="Expression.PropertyOrField"/> would throw.
+    /// </summary>
+    private static Expression ResolveMember(Expression target, string name)
+    {
+        var type = target.Type;
+
+        var pi = type.GetProperty(name);
+        if (pi != null)
+            return Expression.Property(target, pi);
+
+        var fi = type.GetField(name);
+        if (fi != null)
+            return Expression.Field(target, fi);
+
+        if (type.IsInterface)
+        {
+            // GetInterfaces() returns the transitive closure of base interfaces.
+            foreach (var baseInterface in type.GetInterfaces())
+            {
+                var basePi = baseInterface.GetProperty(name);
+                if (basePi != null)
+                    return Expression.Property(Expression.Convert(target, baseInterface), basePi);
+            }
+        }
+
+        // Preserve original error: let PropertyOrField throw its standard exception.
+        return Expression.PropertyOrField(target, name);
+    }
+
     private IQueryable<TModel> AddSorting(IQueryable<TModel> query, ListSortDirection sortDirection,
         string propertyName)
     {
@@ -1270,7 +1304,7 @@ public abstract class DataSource<TViewModel, TModel> : DataSource, IPagedSourceP
         Expression prop = param;
         foreach (var member in propertyName.Split('.'))
         {
-            prop = Expression.PropertyOrField(prop, member);
+            prop = ResolveMember(prop, member);
         }
 
         var sortLambda = Expression.Lambda(prop, param);

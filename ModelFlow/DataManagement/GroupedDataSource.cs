@@ -1462,6 +1462,35 @@ namespace ModelFlow.DataVirtualization.DataManagement
             return queryable;
         }
 
+        /// <summary>
+        /// Resolves a property or field by name, walking base interfaces when the target type
+        /// is an interface. See DataSource&lt;TViewModel,TModel&gt;.ResolveMember for rationale.
+        /// </summary>
+        private static Expression ResolveMember(Expression target, string name)
+        {
+            var type = target.Type;
+
+            var pi = type.GetProperty(name);
+            if (pi != null)
+                return Expression.Property(target, pi);
+
+            var fi = type.GetField(name);
+            if (fi != null)
+                return Expression.Field(target, fi);
+
+            if (type.IsInterface)
+            {
+                foreach (var baseInterface in type.GetInterfaces())
+                {
+                    var basePi = baseInterface.GetProperty(name);
+                    if (basePi != null)
+                        return Expression.Property(Expression.Convert(target, baseInterface), basePi);
+                }
+            }
+
+            return Expression.PropertyOrField(target, name);
+        }
+
         private IQueryable<TModel> AddSorting(IQueryable<TModel> query, ListSortDirection sortDirection, string propertyName)
         {
             var param = Expression.Parameter(typeof(TModel));
@@ -1469,7 +1498,7 @@ namespace ModelFlow.DataVirtualization.DataManagement
 
             foreach (var member in propertyName.Split('.'))
             {
-                prop = Expression.PropertyOrField(prop, member);
+                prop = ResolveMember(prop, member);
             }
 
             var sortLambda = Expression.Lambda(prop, param);
