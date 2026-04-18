@@ -1071,10 +1071,30 @@
         /// <summary>
         /// Sets the count to an authoritative value without expanding pages.
         /// Pages beyond the new count are truncated; pages within it are left as-is.
+        /// When shrinking, emits a <see cref="NotifyCollectionChangedAction.Remove"/>
+        /// event for the truncated tail so virtualized UI controls (TreeDataGrid,
+        /// ItemsRepeater) shrink their virtual height. Without this notification
+        /// the control would believe the removed rows still exist and render
+        /// placeholder slots for indices beyond the new count.
         /// </summary>
         internal void SetKnownCount(int count)
         {
-            GetPaginationManager()?.SetKnownCount(count);
+            var pm = GetPaginationManager();
+            if (pm == null) return;
+
+            var oldCount = pm.GetCount(true);
+            pm.SetKnownCount(count);
+            var newCount = Math.Max(0, count);
+
+            if (newCount >= oldCount) return;
+
+            var removedCount = oldCount - newCount;
+            var placeholders = new T[removedCount];
+            var args = new NotifyCollectionChangedEventArgs(
+                NotifyCollectionChangedAction.Remove,
+                placeholders,
+                newCount);
+            RaiseCollectionChangedEvent(args);
         }
 
         /// <summary>
